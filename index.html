@@ -9,78 +9,172 @@
 <body>
   <div class="page-background">
     <main class="container">
-      <!-- Header -->
-      <header class="header">
-        <h1>PDF Pixel Comparison Tool</h1>
-        <p class="subtitle">🔒 100% Browser-Based – Your files never leave your device</p>
-      </header>
 
-      <!-- Upload Section -->
-      <section class="upload-section">
-        <div class="upload-zones">
-          <div class="upload-zone" id="zone1" data-zone="1">
-            <p class="zone-label">PDF 1 (Original)</p>
-            <p class="zone-hint">Drag & drop or</p>
-            <button type="button" class="browse-btn">Click to browse</button>
-            <p class="filename" id="filename1" aria-live="polite"></p>
+      <!-- ===== SETUP VIEW (visible before comparison) ===== -->
+      <div class="setup-view" id="setupView">
+        <header class="header">
+          <h1>PDF Comparison Tool</h1>
+          <p class="subtitle">Your files never leave your device</p>
+        </header>
+
+        <section class="upload-section">
+          <div class="upload-zones">
+            <div class="upload-zone" id="zone1" data-zone="1">
+              <p class="zone-label">PDF 1 (Original)</p>
+              <p class="zone-hint">Drag & drop or</p>
+              <button type="button" class="browse-btn">Click to browse</button>
+              <p class="filename" id="filename1" aria-live="polite"></p>
+            </div>
+            <div class="upload-zone" id="zone2" data-zone="2">
+              <p class="zone-label">PDF 2 (Modified)</p>
+              <p class="zone-hint">Drag & drop or</p>
+              <button type="button" class="browse-btn">Click to browse</button>
+              <p class="filename" id="filename2" aria-live="polite"></p>
+            </div>
           </div>
-          <div class="upload-zone" id="zone2" data-zone="2">
-            <p class="zone-label">PDF 2 (Modified)</p>
-            <p class="zone-hint">Drag & drop or</p>
-            <button type="button" class="browse-btn">Click to browse</button>
-            <p class="filename" id="filename2" aria-live="polite"></p>
+          <input type="file" id="file1" accept=".pdf,application/pdf" hidden>
+          <input type="file" id="file2" accept=".pdf,application/pdf" hidden>
+        </section>
+
+        <section class="mode-section">
+          <p class="mode-label">Comparison Mode</p>
+          <div class="mode-tabs" role="tablist">
+            <button type="button" class="mode-tab active" id="modeOverlay" role="tab" aria-selected="true" data-mode="overlay">
+              <span class="mode-tab-icon" aria-hidden="true">▣</span> Content Overlay
+            </button>
+            <button type="button" class="mode-tab" id="modeSemantic" role="tab" aria-selected="false" data-mode="semantic">
+              <span class="mode-tab-icon" aria-hidden="true">☰</span> Semantic Text
+            </button>
           </div>
+          <p class="mode-desc" id="modeDesc">Pixel-by-pixel overlay: black/white = match, red = differ.</p>
+        </section>
+
+        <section class="controls-section">
+          <div class="compare-wrapper">
+            <button type="button" class="compare-btn" id="compareBtn" disabled>Compare PDFs</button>
+            <div class="loading-overlay" id="loadingOverlay" aria-hidden="true">
+              <div class="spinner"></div>
+              <p>Processing...</p>
+            </div>
+          </div>
+        </section>
+
+        <div class="error-banner" id="errorBanner" role="alert" hidden>
+          <span id="errorText"></span>
         </div>
-        <input type="file" id="file1" accept=".pdf,application/pdf" hidden>
-        <input type="file" id="file2" accept=".pdf,application/pdf" hidden>
-      </section>
-
-      <!-- Controls -->
-      <section class="controls-section">
-        <div class="compare-wrapper">
-          <button type="button" class="compare-btn" id="compareBtn" disabled>
-            Compare PDFs
-          </button>
-          <div class="loading-overlay" id="loadingOverlay" aria-hidden="true">
-            <div class="spinner"></div>
-            <p>Processing...</p>
-          </div>
-        </div>
-      </section>
-
-      <!-- Error message area -->
-      <div class="error-banner" id="errorBanner" role="alert" hidden>
-        <span id="errorText"></span>
       </div>
 
-      <!-- Results Section (hidden until comparison complete) -->
-      <section class="results-section" id="resultsSection" hidden>
-        <h2>Comparison Result</h2>
-        <div class="legend">
-          <span class="legend-item"><span class="legend-swatch legend-match"></span> Black and white = Content matches</span>
-          <span class="legend-item"><span class="legend-swatch legend-diff"></span> 🔴 Red = Content differs</span>
+      <!-- ===== RESULTS VIEW (fills viewport after comparison) ===== -->
+      <section class="results-view" id="resultsSection" hidden>
+
+        <!-- Top toolbar -->
+        <div class="results-toolbar">
+          <div class="toolbar-left">
+            <label class="toolbar-sync" id="toolbarSyncLabel">
+              <input type="checkbox" id="scrollSync" checked> Scroll sync
+            </label>
+          </div>
+          <div class="toolbar-center">
+            <button type="button" class="toolbar-mode active" id="resultModeSemantic" data-mode="semantic">Semantic Text</button>
+            <button type="button" class="toolbar-mode" id="resultModeOverlay" data-mode="overlay">Content Overlay</button>
+          </div>
+          <div class="toolbar-right">
+            <button type="button" class="toolbar-close" id="newCompareBtn" title="New comparison">&times;</button>
+          </div>
         </div>
-        <div class="canvas-wrapper" id="canvasWrapper">
-          <canvas id="resultCanvas"></canvas>
+
+        <!-- Content Overlay results -->
+        <div class="results-overlay" id="overlayResults" hidden>
+          <div class="overlay-main">
+            <canvas id="resultCanvas"></canvas>
+          </div>
+          <div class="overlay-footer">
+            <div class="footer-group">
+              <span class="legend-chip legend-chip-match"></span><span class="footer-label">Match</span>
+              <span class="legend-chip legend-chip-diff"></span><span class="footer-label">Diff</span>
+              <span class="footer-stats" id="matchPercent">—%</span>
+              <span class="footer-stats-detail" id="statsDetail"></span>
+            </div>
+            <div class="footer-group footer-nav">
+              <button type="button" class="foot-btn" id="prevPage" disabled>&lsaquo;</button>
+              <span class="footer-page" id="pageInfo">1 / 1</span>
+              <button type="button" class="foot-btn" id="nextPage" disabled>&rsaquo;</button>
+            </div>
+            <div class="footer-group">
+              <button type="button" class="foot-btn" id="zoomOut">&minus;</button>
+              <span class="footer-zoom" id="zoomValue">100%</span>
+              <button type="button" class="foot-btn" id="zoomIn">+</button>
+              <button type="button" class="foot-btn download-foot-btn" id="downloadBtn">Download PDF</button>
+            </div>
+          </div>
         </div>
-        <div class="stats" id="stats">
-          <span id="matchPercent">—%</span> of pixels match
-          <span class="stats-detail" id="statsDetail"></span>
+
+        <!-- Semantic Text results -->
+        <div class="results-semantic" id="semanticResults" hidden>
+          <div class="semantic-layout">
+            <!-- PDF 1 panel -->
+            <div class="semantic-panel">
+              <div class="semantic-panel-bar"><span class="panel-dot dot-close"></span><span class="panel-title">Original (PDF 1)</span></div>
+              <div class="semantic-canvas-wrap" id="semanticWrapper1">
+                <canvas id="semanticCanvas1"></canvas>
+              </div>
+              <div class="semantic-panel-foot">
+                <span class="panel-zoom" id="semanticZoom1">100%</span>
+                <span class="panel-zoom-btns">
+                  <button type="button" class="panel-zoom-btn" data-target="1" data-dir="-1">&minus;</button>
+                  <button type="button" class="panel-zoom-btn" data-target="1" data-dir="1">+</button>
+                </span>
+                <span class="panel-filename" id="semanticFilename1"></span>
+              </div>
+            </div>
+            <!-- PDF 2 panel -->
+            <div class="semantic-panel">
+              <div class="semantic-panel-bar"><span class="panel-dot dot-close"></span><span class="panel-title">Modified (PDF 2)</span></div>
+              <div class="semantic-canvas-wrap" id="semanticWrapper2">
+                <canvas id="semanticCanvas2"></canvas>
+              </div>
+              <div class="semantic-panel-foot">
+                <span class="panel-zoom" id="semanticZoom2">100%</span>
+                <span class="panel-zoom-btns">
+                  <button type="button" class="panel-zoom-btn" data-target="2" data-dir="-1">&minus;</button>
+                  <button type="button" class="panel-zoom-btn" data-target="2" data-dir="1">+</button>
+                </span>
+                <span class="panel-filename" id="semanticFilename2"></span>
+              </div>
+            </div>
+            <!-- Sidebar -->
+            <div class="semantic-sidebar">
+              <h3 class="sidebar-heading">Compare PDF</h3>
+              <div class="sidebar-legend">
+                <span class="sidebar-legend-item"><span class="legend-chip legend-chip-old"></span> Removed (red)</span>
+                <span class="sidebar-legend-item"><span class="legend-chip legend-chip-new"></span> Added (green)</span>
+              </div>
+              <div class="sidebar-report">
+                <p class="report-heading">Change report <span id="changeReportCount">(0)</span></p>
+                <p class="report-page-label">All pages</p>
+                <div class="report-cards">
+                  <div class="report-card report-card-old">
+                    <span class="rc-label">Old</span>
+                    <span class="rc-meta" id="reportOldMeta">Present</span>
+                    <span class="rc-diff" id="reportOldDiff">&minus;0</span>
+                  </div>
+                  <div class="report-card report-card-new">
+                    <span class="rc-label">New</span>
+                    <span class="rc-meta" id="reportNewMeta">Present</span>
+                    <span class="rc-diff" id="reportNewDiff">+0</span>
+                  </div>
+                </div>
+              </div>
+              <div class="sidebar-nav">
+                <button type="button" class="foot-btn" id="semanticPrevPage" disabled>&lsaquo;</button>
+                <span class="footer-page" id="semanticPageInfo">1 / 1</span>
+                <button type="button" class="foot-btn" id="semanticNextPage" disabled>&rsaquo;</button>
+              </div>
+              <button type="button" class="sidebar-download" id="downloadReportBtn">Download report</button>
+            </div>
+          </div>
         </div>
-        <div class="zoom-controls">
-          <span class="zoom-label">Zoom</span>
-          <button type="button" class="zoom-btn" id="zoomOut" aria-label="Zoom out">−</button>
-          <span class="zoom-value" id="zoomValue">100%</span>
-          <button type="button" class="zoom-btn" id="zoomIn" aria-label="Zoom in">+</button>
-        </div>
-        <div class="page-nav">
-          <button type="button" class="nav-btn" id="prevPage" disabled>← Previous</button>
-          <span class="page-info" id="pageInfo">Page 1 of 1</span>
-          <button type="button" class="nav-btn" id="nextPage" disabled>Next →</button>
-        </div>
-        <div class="download-row">
-          <button type="button" class="download-btn" id="downloadBtn">Download all images as PDF</button>
-        </div>
+
       </section>
     </main>
   </div>
