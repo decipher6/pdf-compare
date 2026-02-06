@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF Pixel Comparison Tool</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="page-background">
+    <main class="container">
+      <!-- Header -->
+      <header class="header">
+        <h1>PDF Pixel Comparison Tool</h1>
+        <p class="subtitle">🔒 100% Browser-Based – Your files never leave your device</p>
+      </header>
+
+      <!-- Upload Section -->
+      <section class="upload-section">
+        <div class="upload-zones">
+          <div class="upload-zone" id="zone1" data-zone="1">
+            <p class="zone-label">PDF 1 (Original)</p>
+            <p class="zone-hint">Drag & drop or</p>
+            <button type="button" class="browse-btn">Click to browse</button>
+            <p class="filename" id="filename1" aria-live="polite"></p>
+          </div>
+          <div class="upload-zone" id="zone2" data-zone="2">
+            <p class="zone-label">PDF 2 (Modified)</p>
+            <p class="zone-hint">Drag & drop or</p>
+            <button type="button" class="browse-btn">Click to browse</button>
+            <p class="filename" id="filename2" aria-live="polite"></p>
+          </div>
+        </div>
+        <input type="file" id="file1" accept=".pdf,application/pdf" hidden>
+        <input type="file" id="file2" accept=".pdf,application/pdf" hidden>
+      </section>
+
+      <!-- Controls -->
+      <section class="controls-section">
+        <div class="compare-wrapper">
+          <button type="button" class="compare-btn" id="compareBtn" disabled>
+            Compare PDFs
+          </button>
+          <div class="loading-overlay" id="loadingOverlay" aria-hidden="true">
+            <div class="spinner"></div>
+            <p>Processing...</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error message area -->
+      <div class="error-banner" id="errorBanner" role="alert" hidden>
+        <span id="errorText"></span>
+      </div>
+
+      <!-- Results Section (hidden until comparison complete) -->
+      <section class="results-section" id="resultsSection" hidden>
+        <h2>Comparison Result</h2>
+        <div class="legend">
+          <span class="legend-item"><span class="legend-swatch legend-match"></span> Black and white = Content matches</span>
+          <span class="legend-item"><span class="legend-swatch legend-diff"></span> 🔴 Red = Content differs</span>
+        </div>
+        <div class="canvas-wrapper" id="canvasWrapper">
+          <canvas id="resultCanvas"></canvas>
+        </div>
+        <div class="stats" id="stats">
+          <span id="matchPercent">—%</span> of pixels match
+          <span class="stats-detail" id="statsDetail"></span>
+        </div>
+        <div class="zoom-controls">
+          <span class="zoom-label">Zoom</span>
+          <button type="button" class="zoom-btn" id="zoomOut" aria-label="Zoom out">−</button>
+          <span class="zoom-value" id="zoomValue">100%</span>
+          <button type="button" class="zoom-btn" id="zoomIn" aria-label="Zoom in">+</button>
+        </div>
+        <div class="page-nav">
+          <button type="button" class="nav-btn" id="prevPage" disabled>← Previous</button>
+          <span class="page-info" id="pageInfo">Page 1 of 1</span>
+          <button type="button" class="nav-btn" id="nextPage" disabled>Next →</button>
+        </div>
+        <div class="download-row">
+          <button type="button" class="download-btn" id="downloadBtn">Download all images as PDF</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
