@@ -379,11 +379,14 @@
 
   function applyOverlayZoom() {
     resultCanvas.style.maxWidth = zoomLevel === 1 ? '100%' : (zoomLevel * 100) + '%';
-    resultCanvas.style.maxHeight = zoomLevel === 1 ? '100%' : (zoomLevel * 100) + '%';
+    if (zoomLevel === 1) {
+      resultCanvas.style.maxHeight = '';
+    } else {
+      resultCanvas.style.maxHeight = (zoomLevel * 100) + '%';
+    }
     resultCanvas.style.objectFit = zoomLevel === 1 ? 'contain' : '';
-    // When zoomed in, let parent scroll
     var main = resultCanvas.parentElement;
-    main.style.overflow = zoomLevel > 1 ? 'auto' : 'hidden';
+    if (main) main.style.overflow = 'auto';
   }
 
   function cacheOverlay() {
@@ -707,7 +710,243 @@
     URL.revokeObjectURL(a.href);
   });
 
+  // ── Disclaimer Review (API) ─────────────────────────────
+  var DISCLAIMER_API = 'https://comply1-pink.vercel.app';
+  var disclaimerZone = document.getElementById('disclaimerZone');
+  var disclaimerFileInput = document.getElementById('disclaimerFileInput');
+  var disclaimerBrowseBtn = document.getElementById('disclaimerBrowseBtn');
+  var disclaimerFilename = document.getElementById('disclaimerFilename');
+  var disclaimerAnalyzeBtn = document.getElementById('disclaimerAnalyzeBtn');
+  var disclaimerError = document.getElementById('disclaimerError');
+  var disclaimerErrorText = document.getElementById('disclaimerErrorText');
+  var disclaimerModal = document.getElementById('disclaimerModal');
+  var disclaimerModalContent = document.getElementById('disclaimerModalContent');
+  var disclaimerModalBuffering = document.getElementById('disclaimerModalBuffering');
+  var disclaimerModalStatus = document.getElementById('disclaimerModalStatus');
+  var disclaimerModalStatusLeft = document.getElementById('disclaimerModalStatusLeft');
+  var disclaimerModalStatusSummary = document.getElementById('disclaimerModalStatusSummary');
+  var disclaimerModalPdf = document.getElementById('disclaimerModalPdf');
+  var disclaimerModalCommentsTitle = document.getElementById('disclaimerModalCommentsTitle');
+  var disclaimerModalCommentsList = document.getElementById('disclaimerModalCommentsList');
+  var disclaimerModalError = document.getElementById('disclaimerModalError');
+  var disclaimerModalErrorText = document.getElementById('disclaimerModalErrorText');
+  var disclaimerModalClose = document.getElementById('disclaimerModalClose');
+
+  var disclaimerSelectedFile = null;
+  var disclaimerAnnotatedBlobUrl = null;
+
+  function openDisclaimerModal() {
+    if (disclaimerModal) {
+      disclaimerModal.hidden = false;
+      disclaimerModal.setAttribute('aria-hidden', 'false');
+    }
+  }
+
+  function closeDisclaimerModal() {
+    if (disclaimerModal) {
+      disclaimerModal.hidden = true;
+      disclaimerModal.setAttribute('aria-hidden', 'true');
+    }
+    if (disclaimerAnnotatedBlobUrl) {
+      URL.revokeObjectURL(disclaimerAnnotatedBlobUrl);
+      disclaimerAnnotatedBlobUrl = null;
+    }
+    if (disclaimerModalPdf) disclaimerModalPdf.src = '';
+  }
+
+  function showDisclaimerError(msg) {
+    if (disclaimerErrorText) disclaimerErrorText.textContent = msg || '';
+    if (disclaimerError) disclaimerError.hidden = !msg;
+  }
+
+  function escapeHtml(s) {
+    if (s == null) return '';
+    var div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  if (disclaimerZone) {
+    disclaimerZone.addEventListener('click', function (e) {
+      if (e.target === disclaimerBrowseBtn || e.target.closest('.browse-btn')) disclaimerFileInput && disclaimerFileInput.click();
+    });
+    disclaimerZone.addEventListener('dragover', function (e) { e.preventDefault(); disclaimerZone.classList.add('drag-over'); });
+    disclaimerZone.addEventListener('dragleave', function (e) { e.preventDefault(); disclaimerZone.classList.remove('drag-over'); });
+    disclaimerZone.addEventListener('drop', function (e) {
+      e.preventDefault();
+      disclaimerZone.classList.remove('drag-over');
+      var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f && (f.name.toLowerCase().endsWith('.pdf') || f.type === 'application/pdf')) {
+        disclaimerSelectedFile = f;
+        disclaimerFilename.textContent = f.name;
+        disclaimerZone.classList.add('has-file');
+        disclaimerAnalyzeBtn.disabled = false;
+        showDisclaimerError('');
+      }
+    });
+  }
+
+  if (disclaimerFileInput) {
+    disclaimerFileInput.addEventListener('change', function () {
+      var f = disclaimerFileInput.files && disclaimerFileInput.files[0];
+      if (f) {
+        disclaimerSelectedFile = f;
+        disclaimerFilename.textContent = f.name;
+        if (disclaimerZone) disclaimerZone.classList.add('has-file');
+        if (disclaimerAnalyzeBtn) disclaimerAnalyzeBtn.disabled = false;
+        showDisclaimerError('');
+      }
+    });
+  }
+
+  function populateDisclaimerModal(data) {
+    var r = data.result || {};
+    var approved = r.is_approved === true;
+    var summary = (r.summary_blurb || 'No summary.').toString();
+
+    if (disclaimerModalStatus) {
+      disclaimerModalStatus.className = 'disclaimer-modal-status ' + (approved ? 'approved' : 'not-approved');
+    }
+    if (disclaimerModalStatusLeft) {
+      disclaimerModalStatusLeft.textContent = approved ? '✓ APPROVED' : 'NOT APPROVED';
+    }
+    if (disclaimerModalStatusSummary) {
+      disclaimerModalStatusSummary.textContent = summary;
+    }
+
+    if (data.annotated_pdf_base64 && disclaimerModalPdf) {
+      var blob = base64ToBlob(data.annotated_pdf_base64, 'application/pdf');
+      disclaimerAnnotatedBlobUrl = URL.createObjectURL(blob);
+      disclaimerModalPdf.src = disclaimerAnnotatedBlobUrl;
+    } else if (disclaimerModalPdf) {
+      disclaimerModalPdf.src = '';
+    }
+
+    var comments = data.comments || [];
+    if (disclaimerModalCommentsTitle) {
+      disclaimerModalCommentsTitle.textContent = 'COMMENTS (' + comments.length + ')';
+    }
+    if (disclaimerModalCommentsList) {
+      var html = '';
+      comments.forEach(function (c) {
+        var type = (c.type || 'Comment').toString();
+        var color = (c.color || '#999').toString().replace(/^#/, '');
+        if (!/^[0-9A-Fa-f]{6}$/.test(color)) color = '999999';
+        var page = c.page != null ? 'Page ' + (Number(c.page) + 1) : '';
+        var desc = (c.text || c.description || '').toString();
+        var quote = (c.quoted_text || c.quote || '').toString();
+        html += '<div class="disclaimer-comment-card">';
+        html += '<div class="comment-type"><span class="comment-dot" style="background:#' + color + '"></span>' + escapeHtml(type) + '</div>';
+        if (page) html += '<div class="comment-page">' + escapeHtml(page) + '</div>';
+        if (desc) html += '<div>' + escapeHtml(desc) + '</div>';
+        if (quote) html += '<div class="comment-text">' + escapeHtml(quote) + '</div>';
+        html += '</div>';
+      });
+      disclaimerModalCommentsList.innerHTML = html || '<p class="comment-page">No comments.</p>';
+    }
+  }
+
+  if (disclaimerAnalyzeBtn) {
+    disclaimerAnalyzeBtn.addEventListener('click', function () {
+      if (!disclaimerSelectedFile) return;
+      showDisclaimerError('');
+      openDisclaimerModal();
+
+      if (disclaimerAnnotatedBlobUrl) {
+        URL.revokeObjectURL(disclaimerAnnotatedBlobUrl);
+        disclaimerAnnotatedBlobUrl = null;
+      }
+      if (disclaimerModalPdf) disclaimerModalPdf.src = '';
+
+      if (disclaimerModalContent) {
+        disclaimerModalContent.hidden = false;
+        if (disclaimerModalStatusLeft) disclaimerModalStatusLeft.textContent = '—';
+        if (disclaimerModalStatusSummary) disclaimerModalStatusSummary.textContent = '—';
+        if (disclaimerModalCommentsTitle) disclaimerModalCommentsTitle.textContent = 'COMMENTS (0)';
+        if (disclaimerModalCommentsList) disclaimerModalCommentsList.innerHTML = '';
+        if (disclaimerModalStatus) disclaimerModalStatus.className = 'disclaimer-modal-status unknown';
+      }
+      if (disclaimerModalBuffering) disclaimerModalBuffering.hidden = false;
+      if (disclaimerModalError) disclaimerModalError.hidden = true;
+
+      var formData = new FormData();
+      formData.append('file', disclaimerSelectedFile);
+
+      fetch(DISCLAIMER_API + '/api/analyze/', {
+        method: 'POST',
+        body: formData
+      })
+        .then(function (res) {
+          if (!res.ok) {
+            return res.json().then(function (j) { throw new Error(j.detail || j.message || 'Analysis failed'); }).catch(function () {
+              throw new Error('Analysis failed: ' + res.status);
+            });
+          }
+          return res.json();
+        })
+        .then(function (data) {
+          if (disclaimerModalBuffering) disclaimerModalBuffering.hidden = true;
+          if (disclaimerModalError) disclaimerModalError.hidden = true;
+          populateDisclaimerModal(data);
+        })
+        .catch(function (err) {
+          if (disclaimerModalBuffering) disclaimerModalBuffering.hidden = true;
+          if (disclaimerModalError) {
+            disclaimerModalError.hidden = false;
+            if (disclaimerModalErrorText) disclaimerModalErrorText.textContent = err.message || 'Request failed. Try again.';
+          }
+        });
+    });
+  }
+
+  if (disclaimerModalClose) {
+    disclaimerModalClose.addEventListener('click', closeDisclaimerModal);
+  }
+  if (disclaimerModal) {
+    disclaimerModal.addEventListener('click', function (e) {
+      if (e.target === disclaimerModal) closeDisclaimerModal();
+    });
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && disclaimerModal && !disclaimerModal.hidden) closeDisclaimerModal();
+  });
+
+  function base64ToBlob(base64, mime) {
+    if (!base64) return new Blob([], { type: mime || 'application/pdf' });
+    var slice = (base64.indexOf(',') >= 0 ? base64.split(',')[1] : base64).replace(/\s/g, '');
+    var bin = atob(slice);
+    var arr = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return new Blob([arr], { type: mime || 'application/pdf' });
+  }
+
   // ── Init mode tab state ─────────────────────────────────
   setSetupMode('overlay');
+
+  // ── Top bar: tool selection ─────────────────────────────
+  var toolComparePdf = document.getElementById('toolComparePdf');
+  var toolDisclaimerReview = document.getElementById('toolDisclaimerReview');
+  var toolPanelCompare = document.getElementById('toolPanelCompare');
+  var toolPanelDisclaimer = document.getElementById('toolPanelDisclaimer');
+
+  function setActiveTool(tool) {
+    toolComparePdf.classList.toggle('active', tool === 'compare');
+    toolDisclaimerReview.classList.toggle('active', tool === 'disclaimer');
+    if (toolPanelCompare) toolPanelCompare.hidden = tool !== 'compare';
+    if (toolPanelDisclaimer) toolPanelDisclaimer.hidden = tool !== 'disclaimer';
+  }
+
+  if (toolComparePdf) {
+    toolComparePdf.addEventListener('click', function (e) {
+      e.preventDefault();
+      setActiveTool('compare');
+    });
+  }
+  if (toolDisclaimerReview) {
+    toolDisclaimerReview.addEventListener('click', function (e) {
+      e.preventDefault();
+      setActiveTool('disclaimer');
+    });
+  }
 
 })();

@@ -3,13 +3,24 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PDF Pixel Comparison Tool</title>
+  <title>PDF Tools</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- Top bar: tool selection -->
+  <header class="site-topbar">
+    <a href="#" class="topbar-brand" id="topbarBrand">PDF Tools</a>
+    <nav class="topbar-nav">
+      <a href="#" class="topbar-link active" id="toolComparePdf" data-tool="compare">Compare PDF</a>
+      <a href="#" class="topbar-link" id="toolDisclaimerReview" data-tool="disclaimer">Disclaimer Review</a>
+    </nav>
+  </header>
+
   <div class="page-background">
     <main class="container">
 
+      <!-- ===== Tool: Compare PDF ===== -->
+      <div class="tool-panel" id="toolPanelCompare">
       <!-- ===== SETUP VIEW (visible before comparison) ===== -->
       <div class="setup-view" id="setupView">
         <header class="header">
@@ -176,7 +187,68 @@
         </div>
 
       </section>
+      </div>
+      <!-- end tool-panel Compare PDF -->
+
+      <!-- ===== Tool: Disclaimer Review ===== -->
+      <div class="tool-panel" id="toolPanelDisclaimer" hidden>
+        <div class="disclaimer-tool">
+          <header class="disclaimer-header">
+            <h2>Disclaimer Review</h2>
+            <p class="disclaimer-subtitle">AI review of disclaimers against the compliance checklist.</p>
+          </header>
+
+          <section class="disclaimer-upload">
+            <div class="upload-zone disclaimer-zone" id="disclaimerZone">
+              <p class="zone-label">PDF document</p>
+              <p class="zone-hint">Drag & drop or</p>
+              <button type="button" class="browse-btn" id="disclaimerBrowseBtn">Click to browse</button>
+              <p class="filename" id="disclaimerFilename" aria-live="polite"></p>
+            </div>
+            <input type="file" id="disclaimerFileInput" accept=".pdf,application/pdf" hidden>
+
+            <div class="disclaimer-actions">
+              <button type="button" class="compare-btn" id="disclaimerAnalyzeBtn" disabled>Analyze PDF</button>
+            </div>
+
+            <div class="error-banner" id="disclaimerError" role="alert" hidden>
+              <span id="disclaimerErrorText"></span>
+            </div>
+          </section>
+        </div>
+      </div>
+
     </main>
+  </div>
+
+  <!-- Disclaimer Review result modal -->
+  <div class="disclaimer-modal-backdrop" id="disclaimerModal" aria-hidden="true" hidden>
+    <button type="button" class="disclaimer-modal-close" id="disclaimerModalClose" aria-label="Close">&times;</button>
+    <div class="disclaimer-modal">
+      <div class="disclaimer-modal-content" id="disclaimerModalContent" hidden>
+        <div class="disclaimer-modal-buffering" id="disclaimerModalBuffering" hidden>
+          <div class="disclaimer-buffering-spinner"></div>
+          <p class="disclaimer-buffering-text">Analyzing…</p>
+        </div>
+        <div class="disclaimer-modal-status" id="disclaimerModalStatus">
+          <span class="disclaimer-modal-status-left" id="disclaimerModalStatusLeft">—</span>
+          <span class="disclaimer-modal-status-summary" id="disclaimerModalStatusSummary">—</span>
+        </div>
+        <div class="disclaimer-modal-body">
+          <div class="disclaimer-modal-pdf-wrap">
+            <iframe id="disclaimerModalPdf" class="disclaimer-modal-pdf" title="Annotated PDF"></iframe>
+          </div>
+          <aside class="disclaimer-modal-comments">
+            <h3 class="disclaimer-modal-comments-title" id="disclaimerModalCommentsTitle">COMMENTS (0)</h3>
+            <div class="disclaimer-modal-comments-list" id="disclaimerModalCommentsList"></div>
+          </aside>
+        </div>
+      </div>
+
+      <div class="disclaimer-modal-error" id="disclaimerModalError" hidden>
+        <p id="disclaimerModalErrorText"></p>
+      </div>
+    </div>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
