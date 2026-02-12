@@ -94,6 +94,9 @@
   var semanticZoom1 = 1;
   var semanticZoom2 = 1;
 
+  // Page alignment: content-based mapping so missing/extra pages align correctly
+  var pageAlignment = [];   // array of { pdf1: 1-based page or null, pdf2: 1-based page or null }
+
   // Cached results so switching modes doesn't re-compute if same PDFs
   var cachedOverlay = null;   // { resultCanvases, totalPages, currentPageIndex }
   var cachedSemantic = null;  // { semanticResultsByPage, totalPages, semanticCurrentPageIndex }
@@ -236,30 +239,45 @@
 
     var numPages1 = pdfDoc1.numPages;
     var numPages2 = pdfDoc2.numPages;
-    totalPages = Math.min(numPages1, numPages2);
-    if (totalPages === 0) { showError('No pages found in one or both PDFs.'); return; }
+    if (numPages1 === 0 && numPages2 === 0) {
+      showError('No pages found in one or both PDFs.');
+      return;
+    }
 
     cachedOverlay = null;
     cachedSemantic = null;
-
     showResultsView();
-
-    /* Show only the selected mode; the other stays hidden */
     overlayResults.hidden = true;
     semanticResults.hidden = true;
-    if (comparisonMode === 'overlay') {
-      resultModeOverlay.classList.add('active');
-      resultModeSemantic.classList.remove('active');
-      toolbarSyncLabel.style.display = 'none';
-      overlayResults.hidden = false;
-      runOverlayComparison();
-    } else {
-      resultModeSemantic.classList.add('active');
-      resultModeOverlay.classList.remove('active');
-      toolbarSyncLabel.style.display = '';
-      semanticResults.hidden = false;
-      runSemanticComparison();
-    }
+    setLoading(true);
+
+    Promise.all([getDocFingerprints(pdfDoc1), getDocFingerprints(pdfDoc2)])
+      .then(function (arr) {
+        pageAlignment = computePageAlignment(arr[0], arr[1]);
+        totalPages = pageAlignment.length;
+        if (totalPages === 0) {
+          showError('Could not align any pages.');
+          setLoading(false);
+          return;
+        }
+        if (comparisonMode === 'overlay') {
+          resultModeOverlay.classList.add('active');
+          resultModeSemantic.classList.remove('active');
+          toolbarSyncLabel.style.display = 'none';
+          overlayResults.hidden = false;
+          runOverlayComparison();
+        } else {
+          resultModeSemantic.classList.add('active');
+          resultModeOverlay.classList.remove('active');
+          toolbarSyncLabel.style.display = '';
+          semanticResults.hidden = false;
+          runSemanticComparison();
+        }
+      })
+      .catch(function (e) {
+        showError(e && e.message || 'Page alignment failed.');
+        setLoading(false);
+      });
   });
 
   // ===== OVERLAY COMPARISON ===============================
@@ -315,13 +333,42 @@
     return { resultCanvas: out, stats: { total: w*h, match: matchCount, white: whiteCount, diff: diffCount } };
   }
 
-  function compareOnePage(pageNum) {
-    return Promise.all([renderPdfPage(pdfDoc1, pageNum), renderPdfPage(pdfDoc2, pageNum)])
+  function compareOnePage(pageNum1, pageNum2) {
+    return Promise.all([renderPdfPage(pdfDoc1, pageNum1), renderPdfPage(pdfDoc2, pageNum2)])
       .then(function (arr) {
         var n = normalizeToSameSize(arr[0], arr[1]);
         var r = comparePixels(n.canvas1, n.canvas2, n.width, n.height);
-        return { result: r.resultCanvas, stats: r.stats };
+        return { result: r.resultCanvas, stats: r.stats, type: 'both' };
       });
+  }
+
+  function compareOneSlot(slotIndex) {
+    var slot = pageAlignment[slotIndex];
+    if (!slot) return Promise.resolve(null);
+    var p1 = slot.pdf1;
+    var p2 = slot.pdf2;
+    if (p1 !== null && p2 !== null) {
+      return compareOnePage(p1, p2);
+    }
+    if (p1 !== null) {
+      return renderPdfPage(pdfDoc1, p1).then(function (r) {
+        var c = document.createElement('canvas');
+        c.width = r.width;
+        c.height = r.height;
+        c.getContext('2d').drawImage(r.canvas, 0, 0);
+        return { result: c, stats: null, type: 'pdf1-only' };
+      });
+    }
+    if (p2 !== null) {
+      return renderPdfPage(pdfDoc2, p2).then(function (r) {
+        var c = document.createElement('canvas');
+        c.width = r.width;
+        c.height = r.height;
+        c.getContext('2d').drawImage(r.canvas, 0, 0);
+        return { result: c, stats: null, type: 'pdf2-only' };
+      });
+    }
+    return Promise.resolve(null);
   }
 
   function runOverlayComparison() {
@@ -329,8 +376,9 @@
     currentPageIndex = 0;
     zoomLevel = 1;
     setLoading(true);
-    compareOnePage(1)
+    compareOneSlot(0)
       .then(function (p) {
+        if (!p) return;
         resultCanvases[0] = p;
         drawOverlayPage(p);
         updateOverlayNav();
@@ -341,16 +389,22 @@
   }
 
   function drawOverlayPage(p) {
+    if (!p || !p.result) return;
     resultCanvas.width = p.result.width;
     resultCanvas.height = p.result.height;
     resultCanvas.getContext('2d').drawImage(p.result, 0, 0);
-    updateOverlayStats(p.stats);
+    updateOverlayStats(p.stats, p.type);
   }
 
-  function updateOverlayStats(s) {
-    var pct = s.total > 0 ? ((s.match / s.total) * 100).toFixed(2) : '0';
-    matchPercentEl.textContent = pct + '%';
-    statsDetailEl.textContent = s.match.toLocaleString() + ' match · ' + s.diff.toLocaleString() + ' differ';
+  function updateOverlayStats(s, type) {
+    if (type === 'pdf1-only' || type === 'pdf2-only' || !s) {
+      matchPercentEl.textContent = '—';
+      statsDetailEl.textContent = type === 'pdf1-only' ? 'Only in Original' : type === 'pdf2-only' ? 'Only in Modified' : '—';
+    } else {
+      var pct = s.total > 0 ? ((s.match / s.total) * 100).toFixed(2) : '0';
+      matchPercentEl.textContent = pct + '%';
+      statsDetailEl.textContent = s.match.toLocaleString() + ' match · ' + s.diff.toLocaleString() + ' differ';
+    }
     zoomValueEl.textContent = Math.round(zoomLevel * 100) + '%';
   }
 
@@ -363,10 +417,21 @@
   function showOverlayPage(idx) {
     if (idx < 0 || idx >= totalPages) return;
     currentPageIndex = idx;
-    if (resultCanvases[idx]) { drawOverlayPage(resultCanvases[idx]); updateOverlayNav(); cacheOverlay(); return; }
+    if (resultCanvases[idx]) {
+      drawOverlayPage(resultCanvases[idx]);
+      updateOverlayNav();
+      cacheOverlay();
+      return;
+    }
     setLoading(true);
-    compareOnePage(idx + 1)
-      .then(function (p) { resultCanvases[idx] = p; drawOverlayPage(p); updateOverlayNav(); cacheOverlay(); })
+    compareOneSlot(idx)
+      .then(function (p) {
+        if (!p) return;
+        resultCanvases[idx] = p;
+        drawOverlayPage(p);
+        updateOverlayNav();
+        cacheOverlay();
+      })
       .catch(function (e) { showError(e && e.message || 'Page comparison failed.'); })
       .finally(function () { setLoading(false); });
   }
@@ -408,17 +473,20 @@
     setLoading(true);
     var promises = [];
     for (var i = 0; i < totalPages; i++) {
-      promises.push(resultCanvases[i] ? Promise.resolve(resultCanvases[i]) : compareOnePage(i + 1));
+      promises.push(resultCanvases[i] ? Promise.resolve(resultCanvases[i]) : compareOneSlot(i));
     }
     Promise.all(promises)
       .then(function (payloads) {
         resultCanvases = payloads;
+        var valid = payloads.filter(function (p) { return p && p.result; });
+        if (!valid.length) return;
         var jsPDF = window.jspdf.jsPDF;
-        var first = payloads[0].result;
+        var first = valid[0].result;
         var doc = new jsPDF({ orientation: first.width > first.height ? 'landscape' : 'portrait', unit: 'px', format: [first.width, first.height] });
         doc.addImage(first.toDataURL('image/png'), 'PNG', 0, 0, first.width, first.height, undefined, 'FAST');
-        for (var i = 1; i < payloads.length; i++) {
-          var c = payloads[i].result;
+        for (var i = 1; i < valid.length; i++) {
+          var c = valid[i].result;
+          if (!c) continue;
           doc.addPage([c.width, c.height], 'p');
           doc.addImage(c.toDataURL('image/png'), 'PNG', 0, 0, c.width, c.height, undefined, 'FAST');
         }
@@ -456,7 +524,8 @@
           if (cur.length) {
             var txt = cur.map(function (i) { return i.str; }).join('');
             var rects = cur.map(function (i) { return { x: i.x, y: i.pdfBottom, w: i.w, h: i.h }; });
-            lines.push({ text: txt, normalized: normText(txt), rects: rects });
+            var itemStrs = cur.map(function (i) { return i.str; });
+            lines.push({ text: txt, normalized: normText(txt), rects: rects, itemStrs: itemStrs });
           }
           cur = [r]; curY = r.pdfY;
         }
@@ -464,15 +533,215 @@
       if (cur.length) {
         var txt = cur.map(function (i) { return i.str; }).join('');
         var rects = cur.map(function (i) { return { x: i.x, y: i.pdfBottom, w: i.w, h: i.h }; });
-        lines.push({ text: txt, normalized: normText(txt), rects: rects });
+        var itemStrs = cur.map(function (i) { return i.str; });
+        lines.push({ text: txt, normalized: normText(txt), rects: rects, itemStrs: itemStrs });
       }
       return lines;
     });
   }
 
+  var FINGERPRINT_MAX_CHARS = 800;
+
+  function getPageFingerprint(page) {
+    return getTextLinesFromPage(page).then(function (lines) {
+      var text = lines.map(function (l) { return l.normalized; }).join(' ').trim();
+      return normText(text).substring(0, FINGERPRINT_MAX_CHARS);
+    });
+  }
+
+  function getDocFingerprints(pdfDoc) {
+    var n = pdfDoc.numPages;
+    var promises = [];
+    for (var i = 1; i <= n; i++) {
+      promises.push(pdfDoc.getPage(i).then(getPageFingerprint));
+    }
+    return Promise.all(promises);
+  }
+
+  function fingerprintSimilarity(a, b) {
+    if (!a || !b) return 0;
+    var wordsA = a.split(/\s+/).filter(function (w) { return w.length > 0; });
+    var wordsB = b.split(/\s+/).filter(function (w) { return w.length > 0; });
+    if (wordsA.length === 0 && wordsB.length === 0) return 1;
+    if (wordsA.length === 0 || wordsB.length === 0) return 0;
+    var setB = new Set(wordsB);
+    var match = 0;
+    wordsA.forEach(function (w) { if (setB.has(w)) match++; });
+    return match / Math.max(wordsA.length, wordsB.length);
+  }
+
+  var ALIGN_MATCH_THRESHOLD = 0.5;
+
+  function computePageAlignment(fp1, fp2) {
+    var n1 = fp1.length;
+    var n2 = fp2.length;
+    var sim = function (i, j) {
+      return fingerprintSimilarity(fp1[i], fp2[j]);
+    };
+    var M = [];
+    var P = [];
+    var i, j;
+    for (i = 0; i <= n1; i++) {
+      M[i] = [];
+      P[i] = [];
+      for (j = 0; j <= n2; j++) {
+        M[i][j] = -1;
+        P[i][j] = null;
+      }
+    }
+    M[0][0] = 0;
+    for (i = 0; i <= n1; i++) {
+      for (j = 0; j <= n2; j++) {
+        if (M[i][j] < 0) continue;
+        if (i < n1 && j < n2) {
+          var s = sim(i, j);
+          var score = M[i][j] + (s >= ALIGN_MATCH_THRESHOLD ? 1 + s : 0);
+          if (score > M[i + 1][j + 1]) {
+            M[i + 1][j + 1] = score;
+            P[i + 1][j + 1] = 'match';
+          }
+        }
+        if (i < n1 && M[i][j] > M[i + 1][j]) {
+          M[i + 1][j] = M[i][j];
+          P[i + 1][j] = 'only1';
+        }
+        if (j < n2 && M[i][j] > M[i][j + 1]) {
+          M[i][j + 1] = M[i][j];
+          P[i][j + 1] = 'only2';
+        }
+      }
+    }
+    var slots = [];
+    i = n1;
+    j = n2;
+    while (i > 0 || j > 0) {
+      var p = P[i] && P[i][j];
+      if (p === 'match') {
+        slots.unshift({ pdf1: i, pdf2: j });
+        i--;
+        j--;
+      } else if (p === 'only1') {
+        slots.unshift({ pdf1: i, pdf2: null });
+        i--;
+      } else if (p === 'only2') {
+        slots.unshift({ pdf1: null, pdf2: j });
+        j--;
+      } else {
+        if (i > 0) {
+          slots.unshift({ pdf1: i, pdf2: null });
+          i--;
+        } else {
+          slots.unshift({ pdf1: null, pdf2: j });
+          j--;
+        }
+      }
+    }
+    return slots;
+  }
+
   function pdfRectToViewport(rect, vp) {
     var s = vp.scale, vh = vp.height;
     return { x: rect.x * s, y: vh - (rect.y + rect.h) * s, w: rect.w * s, h: rect.h * s };
+  }
+
+  /**
+   * Returns an array of arrays: wordRects[i] = rects for the i-th word in the line (by normalized text).
+   * Uses itemStrs to map character offsets to item/rect indices.
+   */
+  function getWordRectsForLine(line) {
+    var words = (line.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
+    if (!words.length || !line.rects || !line.rects.length) return words.map(function () { return []; });
+    var itemStrs = line.itemStrs || [];
+    if (itemStrs.length !== line.rects.length) return words.map(function (_, i) { return i === 0 ? line.rects.slice() : []; });
+    var text = line.text || itemStrs.join('');
+    var norm = '';
+    var normToText = [];
+    var i = 0;
+    while (i < text.length && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n')) i++;
+    for (; i < text.length; i++) {
+      var c = text[i];
+      if (c === ' ' || c === '\t' || c === '\n') {
+        if (norm.length > 0 && norm[norm.length - 1] !== ' ') {
+          norm += ' ';
+          normToText.push(i);
+        }
+      } else {
+        norm += c;
+        normToText.push(i);
+      }
+    }
+    var itemOffsets = [];
+    var offset = 0;
+    for (var k = 0; k < itemStrs.length; k++) {
+      itemOffsets.push(offset);
+      offset += itemStrs[k].length;
+    }
+    itemOffsets.push(offset);
+    var wordRects = [];
+    var wordStart = 0;
+    for (var wi = 0; wi < words.length; wi++) {
+      var wordEnd = wordStart + words[wi].length;
+      var tStart = wordStart < normToText.length ? normToText[wordStart] : 0;
+      var tEnd = wordEnd > 0 && wordEnd - 1 < normToText.length ? normToText[wordEnd - 1] + 1 : tStart;
+      var rectsForWord = [];
+      for (var k = 0; k < line.rects.length; k++) {
+        var kStart = itemOffsets[k];
+        var kEnd = itemOffsets[k + 1];
+        if (tStart < kEnd && tEnd > kStart) rectsForWord.push(line.rects[k]);
+      }
+      wordRects.push(rectsForWord);
+      wordStart = wordEnd + (wordEnd < norm.length && norm[wordEnd] === ' ' ? 1 : 0);
+    }
+    return wordRects;
+  }
+
+  /**
+   * Word-level diff between two lines. Returns { removedRects, addedRects, removedWordCount, addedWordCount }.
+   * Words are matched in order; unmatched old words -> removedRects, unmatched new words -> addedRects.
+   */
+  function wordLevelDiff(oldLine, newLine) {
+    var removedRects = [];
+    var addedRects = [];
+    var removedWordCount = 0;
+    var addedWordCount = 0;
+    if (!oldLine && !newLine) return { removedRects: removedRects, addedRects: addedRects, removedWordCount: 0, addedWordCount: 0 };
+    if (!oldLine) {
+      if (newLine.rects) addedRects = newLine.rects.slice();
+      addedWordCount = (newLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
+      return { removedRects: removedRects, addedRects: addedRects, removedWordCount: 0, addedWordCount: addedWordCount };
+    }
+    if (!newLine) {
+      if (oldLine.rects) removedRects = oldLine.rects.slice();
+      removedWordCount = (oldLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
+      return { removedRects: removedRects, addedRects: addedRects, removedWordCount: removedWordCount, addedWordCount: 0 };
+    }
+    var oldWords = (oldLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
+    var newWords = (newLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
+    var oldWR = getWordRectsForLine(oldLine);
+    var newWR = getWordRectsForLine(newLine);
+    var newUsed = [];
+    for (var j = 0; j < newWords.length; j++) newUsed[j] = false;
+    for (var oi = 0; oi < oldWords.length; oi++) {
+      var matched = false;
+      for (var j = 0; j < newWords.length; j++) {
+        if (!newUsed[j] && oldWords[oi] === newWords[j]) {
+          newUsed[j] = true;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched && oldWR[oi]) {
+        removedRects = removedRects.concat(oldWR[oi]);
+        removedWordCount++;
+      }
+    }
+    for (var j = 0; j < newWords.length; j++) {
+      if (!newUsed[j] && newWR[j]) {
+        addedRects = addedRects.concat(newWR[j]);
+        addedWordCount++;
+      }
+    }
+    return { removedRects: removedRects, addedRects: addedRects, removedWordCount: removedWordCount, addedWordCount: addedWordCount };
   }
 
   function renderPageWithHighlights(page, vp, rects, fill) {
@@ -486,20 +755,28 @@
     });
   }
 
-  function runSemanticOnePage(pageNum) {
-    return Promise.all([pdfDoc1.getPage(pageNum), pdfDoc2.getPage(pageNum)])
+  function runSemanticOnePage(pdf1PageNum, pdf2PageNum) {
+    return Promise.all([pdfDoc1.getPage(pdf1PageNum), pdfDoc2.getPage(pdf2PageNum)])
       .then(function (pages) {
         var vp1 = pages[0].getViewport({ scale: DPI_SCALE });
         var vp2 = pages[1].getViewport({ scale: DPI_SCALE });
         return Promise.all([getTextLinesFromPage(pages[0]), getTextLinesFromPage(pages[1])])
           .then(function (arr) {
             var linesOld = arr[0], linesNew = arr[1];
-            var oldSet = new Set(linesOld.map(function (l) { return l.normalized; }));
-            var newSet = new Set(linesNew.map(function (l) { return l.normalized; }));
-            var removed = linesOld.filter(function (l) { return l.normalized !== '' && !newSet.has(l.normalized); });
-            var added = linesNew.filter(function (l) { return l.normalized !== '' && !oldSet.has(l.normalized); });
-            var removedRects = removed.reduce(function (a, l) { return a.concat(l.rects); }, []);
-            var addedRects = added.reduce(function (a, l) { return a.concat(l.rects); }, []);
+            var removedRects = [];
+            var addedRects = [];
+            var removedWordCount = 0;
+            var addedWordCount = 0;
+            var maxLines = Math.max(linesOld.length, linesNew.length);
+            for (var i = 0; i < maxLines; i++) {
+              var oldLine = i < linesOld.length ? linesOld[i] : null;
+              var newLine = i < linesNew.length ? linesNew[i] : null;
+              var diff = wordLevelDiff(oldLine, newLine);
+              removedRects = removedRects.concat(diff.removedRects);
+              addedRects = addedRects.concat(diff.addedRects);
+              removedWordCount += diff.removedWordCount;
+              addedWordCount += diff.addedWordCount;
+            }
             return Promise.all([
               renderPageWithHighlights(pages[0], vp1, removedRects, 'rgba(220,53,69,0.35)'),
               renderPageWithHighlights(pages[1], vp2, addedRects, 'rgba(40,167,69,0.35)')
@@ -507,14 +784,103 @@
               return {
                 canvasOld: out[0].canvas,
                 canvasNew: out[1].canvas,
-                removedCount: removed.length,
-                addedCount: added.length,
-                removedLines: removed,  // Store lines for word counting
-                addedLines: added        // Store lines for word counting
+                removedCount: removedWordCount,
+                addedCount: addedWordCount,
+                removedWordCount: removedWordCount,
+                addedWordCount: addedWordCount,
+                removedLines: [],
+                addedLines: []
               };
             });
           });
       });
+  }
+
+  function createBlankCanvas(w, h) {
+    var c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    var ctx = c.getContext('2d');
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, w, h);
+    return c;
+  }
+
+  function runSemanticOneSlot(slotIndex) {
+    var slot = pageAlignment[slotIndex];
+    if (!slot) {
+      var empty = createBlankCanvas(100, 100);
+      return Promise.resolve({
+        canvasOld: empty,
+        canvasNew: empty,
+        removedCount: 0,
+        addedCount: 0,
+        removedLines: [],
+        addedLines: []
+      });
+    }
+    var p1 = slot.pdf1;
+    var p2 = slot.pdf2;
+    if (p1 !== null && p2 !== null) {
+      return runSemanticOnePage(p1, p2);
+    }
+    if (p1 !== null) {
+      return pdfDoc1.getPage(p1).then(function (page) {
+        var vp = page.getViewport({ scale: DPI_SCALE });
+        return getTextLinesFromPage(page).then(function (lines) {
+          var removedRects = lines.reduce(function (a, l) { return a.concat(l.rects); }, []);
+          var removedWordCount = lines.reduce(function (sum, l) {
+            return sum + (l.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
+          }, 0);
+          return renderPageWithHighlights(page, vp, removedRects, 'rgba(220,53,69,0.35)').then(function (out) {
+            var placeholder = createBlankCanvas(out.width, out.height);
+            return {
+              canvasOld: out.canvas,
+              canvasNew: placeholder,
+              removedCount: removedWordCount,
+              addedCount: 0,
+              removedWordCount: removedWordCount,
+              addedWordCount: 0,
+              removedLines: [],
+              addedLines: []
+            };
+          });
+        });
+      });
+    }
+    if (p2 !== null) {
+      return pdfDoc2.getPage(p2).then(function (page) {
+        var vp = page.getViewport({ scale: DPI_SCALE });
+        return getTextLinesFromPage(page).then(function (lines) {
+          var addedRects = lines.reduce(function (a, l) { return a.concat(l.rects); }, []);
+          var addedWordCount = lines.reduce(function (sum, l) {
+            return sum + (l.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
+          }, 0);
+          return renderPageWithHighlights(page, vp, addedRects, 'rgba(40,167,69,0.35)').then(function (out) {
+            var placeholder = createBlankCanvas(out.width, out.height);
+            return {
+              canvasOld: placeholder,
+              canvasNew: out.canvas,
+              removedCount: 0,
+              addedCount: addedWordCount,
+              removedWordCount: 0,
+              addedWordCount: addedWordCount,
+              removedLines: [],
+              addedLines: []
+            };
+          });
+        });
+      });
+    }
+    var empty = createBlankCanvas(100, 100);
+    return Promise.resolve({
+      canvasOld: empty,
+      canvasNew: empty,
+      removedCount: 0,
+      addedCount: 0,
+      removedLines: [],
+      addedLines: []
+    });
   }
 
   function runSemanticComparison() {
@@ -526,10 +892,9 @@
     if (file2Object) semanticFilename2El.textContent = file2Object.name;
     setLoading(true);
     
-    // Process ALL pages and stack them vertically for continuous scroll
     var promises = [];
-    for (var i = 1; i <= totalPages; i++) {
-      promises.push(runSemanticOnePage(i));
+    for (var i = 0; i < totalPages; i++) {
+      promises.push(runSemanticOneSlot(i));
     }
     
     Promise.all(promises)
@@ -571,13 +936,14 @@
     ctx2.fillStyle = 'white';
     ctx2.fillRect(0, 0, c2.width, c2.height);
     
-    // Stack pages vertically
+    // Stack pages vertically with consistent row height per slot so both panels match (scroll sync)
     var y1 = 0, y2 = 0;
     allPages.forEach(function (p) {
+      var rowHeight = Math.max(p.canvasOld.height, p.canvasNew.height);
       ctx1.drawImage(p.canvasOld, 0, y1);
       ctx2.drawImage(p.canvasNew, 0, y2);
-      y1 += p.canvasOld.height;
-      y2 += p.canvasNew.height;
+      y1 += rowHeight;
+      y2 += rowHeight;
     });
     
     // Update display canvases
@@ -600,17 +966,20 @@
   function updateSemanticReport() {
     var remWords = 0, addWords = 0;
     semanticResultsByPage.forEach(function (p) {
-      // Count words in removed lines
-      if (p.removedLines) {
-        p.removedLines.forEach(function (line) {
-          remWords += countWords(line.text);
-        });
-      }
-      // Count words in added lines
-      if (p.addedLines) {
-        p.addedLines.forEach(function (line) {
-          addWords += countWords(line.text);
-        });
+      if (p.removedWordCount != null && p.addedWordCount != null) {
+        remWords += p.removedWordCount;
+        addWords += p.addedWordCount;
+      } else {
+        if (p.removedLines) {
+          p.removedLines.forEach(function (line) {
+            remWords += countWords(line.text);
+          });
+        }
+        if (p.addedLines) {
+          p.addedLines.forEach(function (line) {
+            addWords += countWords(line.text);
+          });
+        }
       }
     });
     
@@ -682,15 +1051,20 @@
     if (!semanticResultsByPage.length) return;
     var remWords = 0, addWords = 0;
     semanticResultsByPage.forEach(function (p) {
-      if (p.removedLines) {
-        p.removedLines.forEach(function (line) {
-          remWords += countWords(line.text);
-        });
-      }
-      if (p.addedLines) {
-        p.addedLines.forEach(function (line) {
-          addWords += countWords(line.text);
-        });
+      if (p.removedWordCount != null && p.addedWordCount != null) {
+        remWords += p.removedWordCount;
+        addWords += p.addedWordCount;
+      } else {
+        if (p.removedLines) {
+          p.removedLines.forEach(function (line) {
+            remWords += countWords(line.text);
+          });
+        }
+        if (p.addedLines) {
+          p.addedLines.forEach(function (line) {
+            addWords += countWords(line.text);
+          });
+        }
       }
     });
     var lines = [
