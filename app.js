@@ -1,7 +1,7 @@
 /**
- * PDF Comparison Tool
- * Overlay mode: client-side pixel diff (files stay in browser).
- * Semantic mode: word-level diff via Diffchecker API (red = removed, green = added).
+ * PDF Pixel Comparison Tool
+ * Client-side only: compares two PDFs and shows overlay or semantic diff.
+ * Files never leave the browser.
  */
 
 (function () {
@@ -29,8 +29,6 @@
   var modeOverlay       = document.getElementById('modeOverlay');
   var modeSemantic      = document.getElementById('modeSemantic');
   var modeDesc          = document.getElementById('modeDesc');
-  var modeEmailWrap     = document.getElementById('modeEmailWrap');
-  var diffcheckerEmail  = document.getElementById('diffcheckerEmail');
   var compareBtn        = document.getElementById('compareBtn');
   var loadingOverlay    = document.getElementById('loadingOverlay');
   var errorBanner       = document.getElementById('errorBanner');
@@ -75,14 +73,6 @@
   var reportNewDiffEl        = document.getElementById('reportNewDiff');
   var scrollSyncCheckbox     = document.getElementById('scrollSync');
   var downloadReportBtn      = document.getElementById('downloadReportBtn');
-  var semanticPanelsWrap    = document.getElementById('semanticPanelsWrap');
-  var semanticDiffApi       = document.getElementById('semanticDiffApi');
-  var semanticDiffApiStyle   = document.getElementById('semanticDiffApiStyle');
-  var semanticDiffApiContent = document.getElementById('semanticDiffApiContent');
-
-  // Diffchecker API for PDF text diff (red = removed, green = added)
-  var DIFFCHECKER_PDF_API = 'https://api.diffchecker.com/public/pdf';
-  var DIFFCHECKER_MAX_SIZE = 2 * 1024 * 1024; // 2 MB per document
 
   // ── State ───────────────────────────────────────────────
 
@@ -109,7 +99,7 @@
 
   // Cached results so switching modes doesn't re-compute if same PDFs
   var cachedOverlay = null;   // { resultCanvases, totalPages, currentPageIndex }
-  var cachedSemantic = null;  // { type: 'api', html, css, added, removed } from Diffchecker API
+  var cachedSemantic = null;  // { semanticResultsByPage, totalPages, semanticCurrentPageIndex }
 
   // ── Helpers ─────────────────────────────────────────────
 
@@ -124,131 +114,12 @@
     return f.name.toLowerCase().endsWith('.pdf') || f.type === 'application/pdf';
   }
 
-  /**
-   * Call Diffchecker API for PDF word diff. Returns { html, css, added, removed }.
-   * Uses html_json for display and json for added/removed counts.
-   * email: required by the API (query param).
-   */
-  function fetchDiffcheckerPdf(leftFile, rightFile, email) {
-    var q = 'output_type=html_json&diff_level=word&input_type=form';
-    if (email && (email = (email + '').trim())) q += '&email=' + encodeURIComponent(email);
-    var baseUrl = DIFFCHECKER_PDF_API + '?' + q;
-    var form = new FormData();
-    form.append('left_pdf', leftFile, leftFile.name || 'left.pdf');
-    form.append('right_pdf', rightFile, rightFile.name || 'right.pdf');
-
-    return fetch(baseUrl, { method: 'POST', body: form })
-      .then(function (res) {
-        if (!res.ok) throw new Error('Diff API failed: ' + res.status);
-        return res.json();
-      })
-      .then(function (data) {
-        var html = data.html || '';
-        var css = data.css || '';
-        var q2 = 'output_type=json&diff_level=word&input_type=form';
-        if (email) q2 += '&email=' + encodeURIComponent(email);
-        var form2 = new FormData();
-        form2.append('left_pdf', leftFile, leftFile.name || 'left.pdf');
-        form2.append('right_pdf', rightFile, rightFile.name || 'right.pdf');
-        return fetch(DIFFCHECKER_PDF_API + '?' + q2, {
-          method: 'POST',
-          body: form2
-        })
-          .then(function (r) { return r.ok ? r.json() : {}; })
-          .catch(function () { return {}; })
-          .then(function (json) {
-            return {
-              html: html,
-              css: css,
-              added: (json && typeof json.added === 'number') ? json.added : null,
-              removed: (json && typeof json.removed === 'number') ? json.removed : null
-            };
-          });
-      });
-  }
-
   function readFileAsArrayBuffer(file) {
     return new Promise(function (resolve, reject) {
       var r = new FileReader();
       r.onload = function () { resolve(r.result); };
       r.onerror = function () { reject(new Error('Failed to read file')); };
       r.readAsArrayBuffer(file);
-    });
-  }
-
-  /**
-   * Split two PDFs into chunk pairs (each chunk under maxSize bytes).
-   * Uses pdf-lib to extract page ranges. Returns Promise<Array<{ leftFile, rightFile, fromPage, toPage }>>.
-   */
-  function getChunkPairs(leftAb, rightAb, leftName, rightName, maxSize) {
-    var PDFDocument = typeof PDFLib !== 'undefined' ? PDFLib.PDFDocument : null;
-    if (!PDFDocument) return Promise.reject(new Error('pdf-lib not loaded'));
-
-    return Promise.all([
-      PDFDocument.load(leftAb),
-      PDFDocument.load(rightAb)
-    ]).then(function (docs) {
-      var leftDoc = docs[0];
-      var rightDoc = docs[1];
-      var leftPages = leftDoc.getPageCount();
-      var rightPages = rightDoc.getPageCount();
-      var maxPages = Math.max(leftPages, rightPages, 1);
-      var chunks = [];
-      var start = 0;
-
-      function createChunkPdf(sourceDoc, fromIdx, toIdx) {
-        if (fromIdx >= toIdx) {
-          return PDFDocument.create().then(function (empty) {
-            empty.addPage([612, 792]);
-            return empty.save();
-          });
-        }
-        var indices = [];
-        for (var i = fromIdx; i < toIdx; i++) indices.push(i);
-        return PDFDocument.create().then(function (newPdf) {
-          return newPdf.copyPages(sourceDoc, indices).then(function (copied) {
-            copied.forEach(function (p) { newPdf.addPage(p); });
-            return newPdf.save();
-          });
-        });
-      }
-
-      function nextChunk() {
-        if (start >= maxPages) return Promise.resolve(chunks);
-        var chunkSize = Math.min(10, maxPages - start);
-        var end = start + chunkSize;
-
-        function trySize(size) {
-          var e = start + size;
-          if (e > maxPages) e = maxPages;
-          var leftEnd = Math.min(e, leftPages);
-          var rightEnd = Math.min(e, rightPages);
-          return Promise.all([
-            createChunkPdf(leftDoc, start, leftEnd),
-            createChunkPdf(rightDoc, start, rightEnd)
-          ]).then(function (pair) {
-            var leftBytes = pair[0];
-            var rightBytes = pair[1];
-            var overLimit = leftBytes.length > maxSize || rightBytes.length > maxSize;
-            if (overLimit && size > 1) {
-              return trySize(Math.floor(size / 2) || 1);
-            }
-            if (overLimit && size === 1) {
-              start += 1;
-              return nextChunk();
-            }
-            var leftFile = new File([leftBytes], leftName.replace(/\.pdf$/i, '-chunk.pdf') || 'left-chunk.pdf', { type: 'application/pdf' });
-            var rightFile = new File([rightBytes], rightName.replace(/\.pdf$/i, '-chunk.pdf') || 'right-chunk.pdf', { type: 'application/pdf' });
-            chunks.push({ leftFile: leftFile, rightFile: rightFile, fromPage: start + 1, toPage: e });
-            start = e;
-            return nextChunk();
-          });
-        }
-
-        return trySize(chunkSize);
-      }
-
-      return nextChunk();
     });
   }
 
@@ -321,7 +192,6 @@
     comparisonMode = mode;
     modeOverlay.classList.toggle('active', mode === 'overlay');
     modeSemantic.classList.toggle('active', mode === 'semantic');
-    if (modeEmailWrap) modeEmailWrap.hidden = mode !== 'semantic';
     modeDesc.textContent = mode === 'overlay'
       ? 'Pixel-by-pixel overlay: black/white = match, red = differ.'
       : 'Compare text changes between two PDFs. Red = removed, Green = added.';
@@ -632,24 +502,6 @@
 
   function normText(s) { return (s || '').trim().replace(/\s+/g, ' '); }
 
-  /**
-   * Normalize word for comparison so the same visual word from both PDFs always matches.
-   * Lowercase, collapse all whitespace (including nbsp), strip zero-width/invisible chars, Unicode NFKC, then strip leading/trailing punctuation.
-   */
-  function normWord(w) {
-    if (!w || !(w + '').length) return '';
-    var s = (w + '')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase()
-      .replace(/[\u200b-\u200d\ufeff\u00ad]/g, '');
-    if (typeof s.normalize === 'function') s = s.normalize('NFKC');
-    var start = 0, end = s.length;
-    while (start < end && /[^\w\u00c0-\u024f]/.test(s[start])) start++;
-    while (end > start && /[^\w\u00c0-\u024f]/.test(s[end - 1])) end--;
-    return end > start ? s.substring(start, end) : s;
-  }
-
   function getTextLinesFromPage(page) {
     return page.getTextContent().then(function (content) {
       var items = content.items || [];
@@ -787,99 +639,365 @@
     return slots;
   }
 
-  function runSemanticComparison() {
-    if (!file1Object || !file2Object) {
-      showError('No files selected.');
-      setLoading(false);
-      return;
-    }
-    var email = diffcheckerEmail ? (diffcheckerEmail.value || '').trim() : '';
-    if (!email) {
-      showError('Please enter your email above. The Diffchecker API requires it for Semantic comparison.');
-      return;
-    }
-    if (semanticFilename1El) semanticFilename1El.textContent = file1Object.name;
-    if (semanticFilename2El) semanticFilename2El.textContent = file2Object.name;
-    setLoading(true);
-    if (semanticPanelsWrap) semanticPanelsWrap.hidden = true;
-    if (semanticDiffApi) semanticDiffApi.hidden = true;
-    if (semanticDiffApiContent) semanticDiffApiContent.innerHTML = '';
-    if (semanticDiffApiStyle) semanticDiffApiStyle.textContent = '';
+  function pdfRectToViewport(rect, vp) {
+    var s = vp.scale, vh = vp.height;
+    return { x: rect.x * s, y: vh - (rect.y + rect.h) * s, w: rect.w * s, h: rect.h * s };
+  }
 
-    var leftSize = file1Object.size || 0;
-    var rightSize = file2Object.size || 0;
-    var useChunks = leftSize > DIFFCHECKER_MAX_SIZE || rightSize > DIFFCHECKER_MAX_SIZE;
-
-    function applyResult(combined) {
-      var css = combined.css || '';
-      var html = combined.html || '';
-      var added = combined.added != null ? combined.added : 0;
-      var removed = combined.removed != null ? combined.removed : 0;
-      if (semanticDiffApiStyle) {
-        semanticDiffApiStyle.textContent = css +
-          '\n\n/* Force readable text (black on white) */\n' +
-          '.semantic-diff-api-content, .semantic-diff-api-content * { color: #1a1a1a !important; }\n';
+  /**
+   * Returns an array of arrays: wordRects[i] = rects for the i-th word in the line (by normalized text).
+   * Uses itemStrs to map character offsets to item/rect indices.
+   */
+  function getWordRectsForLine(line) {
+    var words = (line.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
+    if (!words.length || !line.rects || !line.rects.length) return words.map(function () { return []; });
+    var itemStrs = line.itemStrs || [];
+    if (itemStrs.length !== line.rects.length) return words.map(function (_, i) { return i === 0 ? line.rects.slice() : []; });
+    var text = line.text || itemStrs.join('');
+    var norm = '';
+    var normToText = [];
+    var i = 0;
+    while (i < text.length && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n')) i++;
+    for (; i < text.length; i++) {
+      var c = text[i];
+      if (c === ' ' || c === '\t' || c === '\n') {
+        if (norm.length > 0 && norm[norm.length - 1] !== ' ') {
+          norm += ' ';
+          normToText.push(i);
+        }
+      } else {
+        norm += c;
+        normToText.push(i);
       }
-      if (semanticDiffApiContent) semanticDiffApiContent.innerHTML = html;
-      if (semanticDiffApi) semanticDiffApi.hidden = false;
-      updateSemanticReportFromApi(added, removed);
-      cachedSemantic = { type: 'api', html: html, css: css, added: added, removed: removed };
     }
-
-    if (!useChunks) {
-      fetchDiffcheckerPdf(file1Object, file2Object, email)
-        .then(applyResult)
-        .catch(function (e) {
-          showError(e && e.message ? e.message : 'Semantic comparison failed. The Diffchecker API may be unavailable or CORS may block this request.');
-          if (semanticPanelsWrap) semanticPanelsWrap.hidden = false;
-        })
-        .finally(function () { setLoading(false); });
-      return;
+    var itemOffsets = [];
+    var offset = 0;
+    for (var k = 0; k < itemStrs.length; k++) {
+      itemOffsets.push(offset);
+      offset += itemStrs[k].length;
     }
+    itemOffsets.push(offset);
+    var wordRects = [];
+    var wordStart = 0;
+    for (var wi = 0; wi < words.length; wi++) {
+      var wordEnd = wordStart + words[wi].length;
+      var tStart = wordStart < normToText.length ? normToText[wordStart] : 0;
+      var tEnd = wordEnd > 0 && wordEnd - 1 < normToText.length ? normToText[wordEnd - 1] + 1 : tStart;
+      var rectsForWord = [];
+      for (var k = 0; k < line.rects.length; k++) {
+        var kStart = itemOffsets[k];
+        var kEnd = itemOffsets[k + 1];
+        if (tStart < kEnd && tEnd > kStart) rectsForWord.push(line.rects[k]);
+      }
+      wordRects.push(rectsForWord);
+      wordStart = wordEnd + (wordEnd < norm.length && norm[wordEnd] === ' ' ? 1 : 0);
+    }
+    return wordRects;
+  }
 
-    Promise.all([readFileAsArrayBuffer(file1Object), readFileAsArrayBuffer(file2Object)])
-      .then(function (bufs) {
-        return getChunkPairs(
-          bufs[0], bufs[1],
-          file1Object.name || 'left.pdf',
-          file2Object.name || 'right.pdf',
-          DIFFCHECKER_MAX_SIZE
-        );
-      })
-      .then(function (chunkPairs) {
-        if (!chunkPairs.length) return applyResult({ html: '', css: '', added: 0, removed: 0 });
-        var combined = { html: '', css: '', added: 0, removed: 0 };
-        var seq = chunkPairs.map(function (cp, i) {
-          return fetchDiffcheckerPdf(cp.leftFile, cp.rightFile, email).then(function (r) {
-            var part = (r.html || '').trim();
-            if (part) {
-              combined.html += '<div class="diff-chunk-section" data-pages="' + cp.fromPage + '-' + cp.toPage + '"><p class="diff-chunk-heading">Pages ' + cp.fromPage + '–' + cp.toPage + '</p>' + part + '</div>';
+  /**
+   * Word-level diff between two lines. Returns { removedRects, addedRects, removedWordCount, addedWordCount }.
+   * Words are matched in order; unmatched old words -> removedRects, unmatched new words -> addedRects.
+   */
+  function wordLevelDiff(oldLine, newLine) {
+    var removedRects = [];
+    var addedRects = [];
+    var removedWordCount = 0;
+    var addedWordCount = 0;
+    if (!oldLine && !newLine) return { removedRects: removedRects, addedRects: addedRects, removedWordCount: 0, addedWordCount: 0 };
+    if (!oldLine) {
+      if (newLine.rects) addedRects = newLine.rects.slice();
+      addedWordCount = (newLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
+      return { removedRects: removedRects, addedRects: addedRects, removedWordCount: 0, addedWordCount: addedWordCount };
+    }
+    if (!newLine) {
+      if (oldLine.rects) removedRects = oldLine.rects.slice();
+      removedWordCount = (oldLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
+      return { removedRects: removedRects, addedRects: addedRects, removedWordCount: removedWordCount, addedWordCount: 0 };
+    }
+    var oldWords = (oldLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
+    var newWords = (newLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
+    var oldWR = getWordRectsForLine(oldLine);
+    var newWR = getWordRectsForLine(newLine);
+    var newUsed = [];
+    for (var j = 0; j < newWords.length; j++) newUsed[j] = false;
+    for (var oi = 0; oi < oldWords.length; oi++) {
+      var matched = false;
+      for (var j = 0; j < newWords.length; j++) {
+        if (!newUsed[j] && oldWords[oi] === newWords[j]) {
+          newUsed[j] = true;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched && oldWR[oi]) {
+        removedRects = removedRects.concat(oldWR[oi]);
+        removedWordCount++;
+      }
+    }
+    for (var j = 0; j < newWords.length; j++) {
+      if (!newUsed[j] && newWR[j]) {
+        addedRects = addedRects.concat(newWR[j]);
+        addedWordCount++;
+      }
+    }
+    return { removedRects: removedRects, addedRects: addedRects, removedWordCount: removedWordCount, addedWordCount: addedWordCount };
+  }
+
+  function renderPageWithHighlights(page, vp, rects, fill) {
+    var c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
+    var ctx = c.getContext('2d');
+    ctx.fillStyle = 'white'; ctx.fillRect(0, 0, c.width, c.height);
+    return page.render({ canvasContext: ctx, viewport: vp }).promise.then(function () {
+      ctx.fillStyle = fill;
+      rects.forEach(function (r) { var v = pdfRectToViewport(r, vp); ctx.fillRect(v.x, v.y, v.w, v.h); });
+      return { canvas: c, width: c.width, height: c.height };
+    });
+  }
+
+  function runSemanticOnePage(pdf1PageNum, pdf2PageNum) {
+    return Promise.all([pdfDoc1.getPage(pdf1PageNum), pdfDoc2.getPage(pdf2PageNum)])
+      .then(function (pages) {
+        var vp1 = pages[0].getViewport({ scale: DPI_SCALE });
+        var vp2 = pages[1].getViewport({ scale: DPI_SCALE });
+        return Promise.all([getTextLinesFromPage(pages[0]), getTextLinesFromPage(pages[1])])
+          .then(function (arr) {
+            var linesOld = arr[0], linesNew = arr[1];
+            var removedRects = [];
+            var addedRects = [];
+            var removedWordCount = 0;
+            var addedWordCount = 0;
+            var maxLines = Math.max(linesOld.length, linesNew.length);
+            for (var i = 0; i < maxLines; i++) {
+              var oldLine = i < linesOld.length ? linesOld[i] : null;
+              var newLine = i < linesNew.length ? linesNew[i] : null;
+              var diff = wordLevelDiff(oldLine, newLine);
+              removedRects = removedRects.concat(diff.removedRects);
+              addedRects = addedRects.concat(diff.addedRects);
+              removedWordCount += diff.removedWordCount;
+              addedWordCount += diff.addedWordCount;
             }
-            if (!combined.css && (r.css || '').trim()) combined.css = r.css;
-            combined.added += (r.added != null ? r.added : 0);
-            combined.removed += (r.removed != null ? r.removed : 0);
+            return Promise.all([
+              renderPageWithHighlights(pages[0], vp1, removedRects, 'rgba(220,53,69,0.35)'),
+              renderPageWithHighlights(pages[1], vp2, addedRects, 'rgba(40,167,69,0.35)')
+            ]).then(function (out) {
+              return {
+                canvasOld: out[0].canvas,
+                canvasNew: out[1].canvas,
+                removedCount: removedWordCount,
+                addedCount: addedWordCount,
+                removedWordCount: removedWordCount,
+                addedWordCount: addedWordCount,
+                removedLines: [],
+                addedLines: []
+              };
+            });
+          });
+      });
+  }
+
+  function createBlankCanvas(w, h) {
+    var c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    var ctx = c.getContext('2d');
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, w, h);
+    return c;
+  }
+
+  function runSemanticOneSlot(slotIndex) {
+    var slot = pageAlignment[slotIndex];
+    if (!slot) {
+      var empty = createBlankCanvas(100, 100);
+      return Promise.resolve({
+        canvasOld: empty,
+        canvasNew: empty,
+        removedCount: 0,
+        addedCount: 0,
+        removedLines: [],
+        addedLines: []
+      });
+    }
+    var p1 = slot.pdf1;
+    var p2 = slot.pdf2;
+    if (p1 !== null && p2 !== null) {
+      return runSemanticOnePage(p1, p2);
+    }
+    if (p1 !== null) {
+      return pdfDoc1.getPage(p1).then(function (page) {
+        var vp = page.getViewport({ scale: DPI_SCALE });
+        return getTextLinesFromPage(page).then(function (lines) {
+          var removedRects = lines.reduce(function (a, l) { return a.concat(l.rects); }, []);
+          var removedWordCount = lines.reduce(function (sum, l) {
+            return sum + (l.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
+          }, 0);
+          return renderPageWithHighlights(page, vp, removedRects, 'rgba(220,53,69,0.35)').then(function (out) {
+            var placeholder = createBlankCanvas(out.width, out.height);
+            return {
+              canvasOld: out.canvas,
+              canvasNew: placeholder,
+              removedCount: removedWordCount,
+              addedCount: 0,
+              removedWordCount: removedWordCount,
+              addedWordCount: 0,
+              removedLines: [],
+              addedLines: []
+            };
           });
         });
-        return Promise.all(seq).then(function () { return combined; });
+      });
+    }
+    if (p2 !== null) {
+      return pdfDoc2.getPage(p2).then(function (page) {
+        var vp = page.getViewport({ scale: DPI_SCALE });
+        return getTextLinesFromPage(page).then(function (lines) {
+          var addedRects = lines.reduce(function (a, l) { return a.concat(l.rects); }, []);
+          var addedWordCount = lines.reduce(function (sum, l) {
+            return sum + (l.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
+          }, 0);
+          return renderPageWithHighlights(page, vp, addedRects, 'rgba(40,167,69,0.35)').then(function (out) {
+            var placeholder = createBlankCanvas(out.width, out.height);
+            return {
+              canvasOld: placeholder,
+              canvasNew: out.canvas,
+              removedCount: 0,
+              addedCount: addedWordCount,
+              removedWordCount: 0,
+              addedWordCount: addedWordCount,
+              removedLines: [],
+              addedLines: []
+            };
+          });
+        });
+      });
+    }
+    var empty = createBlankCanvas(100, 100);
+    return Promise.resolve({
+      canvasOld: empty,
+      canvasNew: empty,
+      removedCount: 0,
+      addedCount: 0,
+      removedLines: [],
+      addedLines: []
+    });
+  }
+
+  function runSemanticComparison() {
+    semanticResultsByPage = [];
+    semanticCurrentPageIndex = 0;
+    semanticZoom1 = 1;
+    semanticZoom2 = 1;
+    if (file1Object) semanticFilename1El.textContent = file1Object.name;
+    if (file2Object) semanticFilename2El.textContent = file2Object.name;
+    setLoading(true);
+    
+    var promises = [];
+    for (var i = 0; i < totalPages; i++) {
+      promises.push(runSemanticOneSlot(i));
+    }
+    
+    Promise.all(promises)
+      .then(function (allPages) {
+        semanticResultsByPage = allPages;
+        // Stack all pages vertically into continuous canvases
+        drawSemanticAllPages(allPages);
+        updateSemanticReport();
+        updateSemanticNav();
+        cacheSemantic();
       })
-      .then(applyResult)
-      .catch(function (e) {
-        showError(e && e.message ? e.message : 'Semantic comparison failed. Large PDFs were split into chunks; the API or pdf-lib may have failed.');
-        if (semanticPanelsWrap) semanticPanelsWrap.hidden = false;
-      })
+      .catch(function (e) { showError(e && e.message || 'Semantic comparison failed.'); })
       .finally(function () { setLoading(false); });
   }
 
-  function updateSemanticReportFromApi(added, removed) {
-    if (changeReportCountEl) {
-      var total = (added != null && removed != null) ? (added + removed) : 0;
-      changeReportCountEl.textContent = '(' + total + ')';
-    }
-    if (reportOldDiffEl) reportOldDiffEl.textContent = removed != null ? '−' + removed : '−0';
-    if (reportNewDiffEl) reportNewDiffEl.textContent = added != null ? '+' + added : '+0';
+  function drawSemanticAllPages(allPages) {
+    if (!allPages || !allPages.length) return;
+    
+    // Calculate total height and max width
+    var maxWidth = 0;
+    var totalHeight = 0;
+    allPages.forEach(function (p) {
+      maxWidth = Math.max(maxWidth, p.canvasOld.width, p.canvasNew.width);
+      totalHeight += Math.max(p.canvasOld.height, p.canvasNew.height);
+    });
+    
+    // Create continuous canvases
+    var c1 = document.createElement('canvas');
+    c1.width = maxWidth;
+    c1.height = totalHeight;
+    var ctx1 = c1.getContext('2d');
+    ctx1.fillStyle = 'white';
+    ctx1.fillRect(0, 0, c1.width, c1.height);
+    
+    var c2 = document.createElement('canvas');
+    c2.width = maxWidth;
+    c2.height = totalHeight;
+    var ctx2 = c2.getContext('2d');
+    ctx2.fillStyle = 'white';
+    ctx2.fillRect(0, 0, c2.width, c2.height);
+    
+    // Stack pages vertically with consistent row height per slot so both panels match (scroll sync)
+    var y1 = 0, y2 = 0;
+    allPages.forEach(function (p) {
+      var rowHeight = Math.max(p.canvasOld.height, p.canvasNew.height);
+      ctx1.drawImage(p.canvasOld, 0, y1);
+      ctx2.drawImage(p.canvasNew, 0, y2);
+      y1 += rowHeight;
+      y2 += rowHeight;
+    });
+    
+    // Update display canvases
+    semanticCanvas1.width = c1.width;
+    semanticCanvas1.height = c1.height;
+    semanticCanvas1.getContext('2d').drawImage(c1, 0, 0);
+    
+    semanticCanvas2.width = c2.width;
+    semanticCanvas2.height = c2.height;
+    semanticCanvas2.getContext('2d').drawImage(c2, 0, 0);
+    
+    applySemanticZoom();
   }
 
-  // Semantic scroll sync (used when canvas panels are shown; hidden when using API diff)
+  function countWords(text) {
+    if (!text || !text.trim()) return 0;
+    return text.trim().split(/\s+/).filter(function (w) { return w.length > 0; }).length;
+  }
+
+  function updateSemanticReport() {
+    var remWords = 0, addWords = 0;
+    semanticResultsByPage.forEach(function (p) {
+      if (p.removedWordCount != null && p.addedWordCount != null) {
+        remWords += p.removedWordCount;
+        addWords += p.addedWordCount;
+      } else {
+        if (p.removedLines) {
+          p.removedLines.forEach(function (line) {
+            remWords += countWords(line.text);
+          });
+        }
+        if (p.addedLines) {
+          p.addedLines.forEach(function (line) {
+            addWords += countWords(line.text);
+          });
+        }
+      }
+    });
+    
+    var totalChanges = remWords + addWords;
+    changeReportCountEl.textContent = '(' + totalChanges + ')';
+    reportOldDiffEl.innerHTML = '&minus;' + remWords;
+    reportNewDiffEl.textContent = '+' + addWords;
+    if (semanticPageDisplayEl) semanticPageDisplayEl.textContent = 'All pages';
+  }
+
+  function updateSemanticNav() {
+    // Show total pages since we're displaying all pages continuously
+    semanticPageInfoEl.textContent = totalPages + ' pages';
+    semanticPrevPageBtn.disabled = true;  // No page nav needed for continuous scroll
+    semanticNextPageBtn.disabled = true;
+  }
+
+  // Semantic scroll sync
   if (scrollSyncCheckbox && semanticWrapper1 && semanticWrapper2) {
     var syncing = false;
     function sync(src, tgt) {
@@ -911,44 +1029,51 @@
     applySemanticZoom();
   });
 
+  function cacheSemantic() {
+    cachedSemantic = { semanticResultsByPage: semanticResultsByPage, totalPages: totalPages, semanticCurrentPageIndex: semanticCurrentPageIndex };
+  }
+
   function restoreSemantic() {
-    if (!cachedSemantic || cachedSemantic.type !== 'api') return;
+    semanticResultsByPage = cachedSemantic.semanticResultsByPage;
+    totalPages = cachedSemantic.totalPages;
+    semanticCurrentPageIndex = cachedSemantic.semanticCurrentPageIndex;
     if (file1Object) semanticFilename1El.textContent = file1Object.name;
     if (file2Object) semanticFilename2El.textContent = file2Object.name;
-    if (semanticPanelsWrap) semanticPanelsWrap.hidden = true;
-    if (semanticDiffApiStyle) {
-      semanticDiffApiStyle.textContent = (cachedSemantic.css || '') +
-        '\n\n/* Force readable text (black on white) */\n' +
-        '.semantic-diff-api-content, .semantic-diff-api-content * { color: #1a1a1a !important; }\n';
+    if (semanticResultsByPage && semanticResultsByPage.length) {
+      drawSemanticAllPages(semanticResultsByPage);
     }
-    if (semanticDiffApiContent) semanticDiffApiContent.innerHTML = cachedSemantic.html || '';
-    if (semanticDiffApi) semanticDiffApi.hidden = false;
-    updateSemanticReportFromApi(cachedSemantic.added, cachedSemantic.removed);
+    updateSemanticNav();
+    updateSemanticReport();
   }
 
   // Download report
   downloadReportBtn.addEventListener('click', function () {
+    if (!semanticResultsByPage.length) return;
     var remWords = 0, addWords = 0;
-    if (cachedSemantic && cachedSemantic.type === 'api') {
-      remWords = cachedSemantic.removed != null ? cachedSemantic.removed : 0;
-      addWords = cachedSemantic.added != null ? cachedSemantic.added : 0;
-    } else {
-      if (!semanticResultsByPage.length) return;
-      semanticResultsByPage.forEach(function (p) {
-        if (p.removedWordCount != null && p.addedWordCount != null) {
-          remWords += p.removedWordCount;
-          addWords += p.addedWordCount;
+    semanticResultsByPage.forEach(function (p) {
+      if (p.removedWordCount != null && p.addedWordCount != null) {
+        remWords += p.removedWordCount;
+        addWords += p.addedWordCount;
+      } else {
+        if (p.removedLines) {
+          p.removedLines.forEach(function (line) {
+            remWords += countWords(line.text);
+          });
         }
-      });
-    }
+        if (p.addedLines) {
+          p.addedLines.forEach(function (line) {
+            addWords += countWords(line.text);
+          });
+        }
+      }
+    });
     var lines = [
-      'PDF Comparison Report (Semantic Text – Diffchecker API)',
+      'PDF Comparison Report (Semantic Text)',
       'Original: ' + (file1Object ? file1Object.name : 'PDF 1'),
       'Modified: ' + (file2Object ? file2Object.name : 'PDF 2'),
-      '',
-      'Summary:',
-      '  Words removed (red): ' + remWords,
-      '  Words added (green): ' + addWords,
+      '', 'Summary (across all pages):',
+      '  Words removed from Modified: ' + remWords,
+      '  Words added in Modified: ' + addWords,
       '  Total word changes: ' + (remWords + addWords)
     ];
     var blob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
