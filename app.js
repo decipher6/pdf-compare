@@ -1,7 +1,7 @@
 /**
- * PDF Pixel Comparison Tool
- * Client-side only: compares two PDFs and shows overlay or semantic diff.
- * Files never leave the browser.
+ * PDF Comparison Tool
+ * Overlay mode: client-side pixel diff (files stay in browser).
+ * Semantic mode: word-level diff via Diffchecker API (red = removed, green = added).
  */
 
 (function () {
@@ -29,6 +29,8 @@
   var modeOverlay       = document.getElementById('modeOverlay');
   var modeSemantic      = document.getElementById('modeSemantic');
   var modeDesc          = document.getElementById('modeDesc');
+  var modeEmailWrap     = document.getElementById('modeEmailWrap');
+  var diffcheckerEmail  = document.getElementById('diffcheckerEmail');
   var compareBtn        = document.getElementById('compareBtn');
   var loadingOverlay    = document.getElementById('loadingOverlay');
   var errorBanner       = document.getElementById('errorBanner');
@@ -73,6 +75,13 @@
   var reportNewDiffEl        = document.getElementById('reportNewDiff');
   var scrollSyncCheckbox     = document.getElementById('scrollSync');
   var downloadReportBtn      = document.getElementById('downloadReportBtn');
+  var semanticPanelsWrap    = document.getElementById('semanticPanelsWrap');
+  var semanticDiffApi       = document.getElementById('semanticDiffApi');
+  var semanticDiffApiStyle   = document.getElementById('semanticDiffApiStyle');
+  var semanticDiffApiContent = document.getElementById('semanticDiffApiContent');
+
+  // Diffchecker API for PDF text diff (red = removed, green = added)
+  var DIFFCHECKER_PDF_API = 'https://api.diffchecker.com/public/pdf';
 
   // ── State ───────────────────────────────────────────────
 
@@ -99,7 +108,7 @@
 
   // Cached results so switching modes doesn't re-compute if same PDFs
   var cachedOverlay = null;   // { resultCanvases, totalPages, currentPageIndex }
-  var cachedSemantic = null;  // { semanticResultsByPage, totalPages, semanticCurrentPageIndex }
+  var cachedSemantic = null;  // { type: 'api', html, css, added, removed } from Diffchecker API
 
   // ── Helpers ─────────────────────────────────────────────
 
@@ -112,6 +121,49 @@
   function isPdfFile(f) {
     if (!f || !f.name) return false;
     return f.name.toLowerCase().endsWith('.pdf') || f.type === 'application/pdf';
+  }
+
+  /**
+   * Call Diffchecker API for PDF word diff. Returns { html, css, added, removed }.
+   * Uses html_json for display and json for added/removed counts.
+   * email: required by the API (query param).
+   */
+  function fetchDiffcheckerPdf(leftFile, rightFile, email) {
+    var q = 'output_type=html_json&diff_level=word&input_type=form';
+    if (email && (email = (email + '').trim())) q += '&email=' + encodeURIComponent(email);
+    var baseUrl = DIFFCHECKER_PDF_API + '?' + q;
+    var form = new FormData();
+    form.append('left_pdf', leftFile, leftFile.name || 'left.pdf');
+    form.append('right_pdf', rightFile, rightFile.name || 'right.pdf');
+
+    return fetch(baseUrl, { method: 'POST', body: form })
+      .then(function (res) {
+        if (!res.ok) throw new Error('Diff API failed: ' + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var html = data.html || '';
+        var css = data.css || '';
+        var q2 = 'output_type=json&diff_level=word&input_type=form';
+        if (email) q2 += '&email=' + encodeURIComponent(email);
+        var form2 = new FormData();
+        form2.append('left_pdf', leftFile, leftFile.name || 'left.pdf');
+        form2.append('right_pdf', rightFile, rightFile.name || 'right.pdf');
+        return fetch(DIFFCHECKER_PDF_API + '?' + q2, {
+          method: 'POST',
+          body: form2
+        })
+          .then(function (r) { return r.ok ? r.json() : {}; })
+          .catch(function () { return {}; })
+          .then(function (json) {
+            return {
+              html: html,
+              css: css,
+              added: (json && typeof json.added === 'number') ? json.added : null,
+              removed: (json && typeof json.removed === 'number') ? json.removed : null
+            };
+          });
+      });
   }
 
   function readFileAsArrayBuffer(file) {
@@ -192,6 +244,7 @@
     comparisonMode = mode;
     modeOverlay.classList.toggle('active', mode === 'overlay');
     modeSemantic.classList.toggle('active', mode === 'semantic');
+    if (modeEmailWrap) modeEmailWrap.hidden = mode !== 'semantic';
     modeDesc.textContent = mode === 'overlay'
       ? 'Pixel-by-pixel overlay: black/white = match, red = differ.'
       : 'Compare text changes between two PDFs. Red = removed, Green = added.';
@@ -657,475 +710,60 @@
     return slots;
   }
 
-  function pdfRectToViewport(rect, vp) {
-    var s = vp.scale, vh = vp.height;
-    return { x: rect.x * s, y: vh - (rect.y + rect.h) * s, w: rect.w * s, h: rect.h * s };
-  }
-
-  /**
-   * Returns an array of arrays: wordRects[i] = rects for the i-th word in the line (by normalized text).
-   * When a PDF item spans multiple words, we give each word only its proportional sub-rect so we never
-   * highlight a whole line for one word.
-   */
-  function getWordRectsForLine(line) {
-    var words = (line.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
-    if (!words.length || !line.rects || !line.rects.length) return words.map(function () { return []; });
-    var itemStrs = line.itemStrs || [];
-    if (itemStrs.length !== line.rects.length) {
-      // Don't give the first word the whole line - split proportionally by word length
-      var totalLen = words.reduce(function (s, w) { return s + w.length; }, 0);
-      if (totalLen <= 0) return words.map(function () { return []; });
-      var lineX = Infinity, lineY = Infinity, lineRight = -Infinity, lineBottom = -Infinity;
-      line.rects.forEach(function (r) {
-        lineX = Math.min(lineX, r.x);
-        lineY = Math.min(lineY, r.y);
-        lineRight = Math.max(lineRight, r.x + r.w);
-        lineBottom = Math.max(lineBottom, r.y + r.h);
-      });
-      var lineW = lineRight - lineX, lineH = lineBottom - lineY;
-      var wordRects = [], offset = 0;
-      for (var wi = 0; wi < words.length; wi++) {
-        var frac = words[wi].length / totalLen;
-        wordRects.push([{ x: lineX + (offset / totalLen) * lineW, y: lineY, w: frac * lineW, h: lineH }]);
-        offset += words[wi].length;
-      }
-      return wordRects;
-    }
-    var text = line.text || itemStrs.join('');
-    var norm = '';
-    var normToText = [];
-    var idx = 0;
-    while (idx < text.length && (text[idx] === ' ' || text[idx] === '\t' || text[idx] === '\n')) idx++;
-    for (; idx < text.length; idx++) {
-      var c = text[idx];
-      if (c === ' ' || c === '\t' || c === '\n') {
-        if (norm.length > 0 && norm[norm.length - 1] !== ' ') {
-          norm += ' ';
-          normToText.push(idx);
-        }
-      } else {
-        norm += c;
-        normToText.push(idx);
-      }
-    }
-    var itemOffsets = [];
-    var offset = 0;
-    for (var k = 0; k < itemStrs.length; k++) {
-      itemOffsets.push(offset);
-      offset += itemStrs[k].length;
-    }
-    itemOffsets.push(offset);
-    var wordRects = [];
-    for (var wi = 0; wi < words.length; wi++) wordRects.push([]);
-    var wordBoundaries = [];
-    var wordStart = 0;
-    for (var wi = 0; wi < words.length; wi++) {
-      var wordEnd = wordStart + words[wi].length;
-      var tStart = wordStart < normToText.length ? normToText[wordStart] : 0;
-      var tEnd = wordEnd > 0 && wordEnd - 1 < normToText.length ? normToText[wordEnd - 1] + 1 : tStart;
-      wordBoundaries.push({ start: tStart, end: tEnd });
-      wordStart = wordEnd + (wordEnd < norm.length && norm[wordEnd] === ' ' ? 1 : 0);
-    }
-    for (var k = 0; k < line.rects.length; k++) {
-      var kStart = itemOffsets[k];
-      var kEnd = itemOffsets[k + 1];
-      var R = line.rects[k];
-      var itemLen = kEnd - kStart;
-      if (itemLen <= 0) continue;
-      for (var wi = 0; wi < wordBoundaries.length; wi++) {
-        var wb = wordBoundaries[wi];
-        if (kStart >= wb.end || kEnd <= wb.start) continue;
-        var oStart = Math.max(kStart, wb.start);
-        var oEnd = Math.min(kEnd, wb.end);
-        var fracStart = (oStart - kStart) / itemLen;
-        var fracEnd = (oEnd - kStart) / itemLen;
-        var subW = (fracEnd - fracStart) * R.w;
-        if (subW <= 0) continue;
-        wordRects[wi].push({
-          x: R.x + fracStart * R.w,
-          y: R.y,
-          w: subW,
-          h: R.h
-        });
-      }
-    }
-    return wordRects;
-  }
-
-  /**
-   * LCS of two word arrays (equality via normWord). Returns which old/new indices are in the LCS.
-   * Order-sensitive: so "change" replacing "permitted" is not matched to "change" elsewhere in old.
-   */
-  function wordLCS(oldWords, newWords) {
-    var n = oldWords.length, m = newWords.length;
-    var dp = [];
-    var path = [];
-    for (var i = 0; i <= n; i++) {
-      dp[i] = [];
-      path[i] = [];
-      for (var j = 0; j <= m; j++) {
-        dp[i][j] = 0;
-        path[i][j] = null;
-      }
-    }
-    for (var i = 1; i <= n; i++) {
-      for (var j = 1; j <= m; j++) {
-        var matchScore = normWord(oldWords[i - 1]) === normWord(newWords[j - 1]) ? 1 : 0;
-        var best = dp[i - 1][j - 1] + matchScore;
-        path[i][j] = 'match';
-        if (dp[i - 1][j] > best) { best = dp[i - 1][j]; path[i][j] = 'only1'; }
-        if (dp[i][j - 1] > best) { best = dp[i][j - 1]; path[i][j] = 'only2'; }
-        dp[i][j] = best;
-      }
-    }
-    var oldInLCS = [], newInLCS = [];
-    for (var i = 0; i < n; i++) oldInLCS[i] = false;
-    for (var j = 0; j < m; j++) newInLCS[j] = false;
-    var i = n, j = m;
-    while (i > 0 || j > 0) {
-      var p = path[i] && path[i][j];
-      if (p === 'match') {
-        oldInLCS[i - 1] = true;
-        newInLCS[j - 1] = true;
-        i--;
-        j--;
-      } else if (p === 'only1') {
-        i--;
-      } else if (p === 'only2') {
-        j--;
-      } else {
-        if (i > 0) i--;
-        else if (j > 0) j--;
-      }
-    }
-    return { oldInLCS: oldInLCS, newInLCS: newInLCS };
-  }
-
-  /**
-   * Build a flat word stream from all lines on a page, with metadata (lineIdx, wordIdx) per word for rect lookup.
-   * Returns { words: string[], meta: { lineIdx, wordIdx }[] }.
-   */
-  function buildPageWordStream(lines) {
-    var words = [];
-    var meta = [];
-    for (var lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-      var line = lines[lineIdx];
-      var lineWords = (line.normalized || '').replace(/\s+/g, ' ').trim().split(/\s+/).filter(function (w) { return w.length > 0; });
-      for (var wordIdx = 0; wordIdx < lineWords.length; wordIdx++) {
-        words.push(lineWords[wordIdx]);
-        meta.push({ lineIdx: lineIdx, wordIdx: wordIdx });
-      }
-    }
-    return { words: words, meta: meta };
-  }
-
-  /**
-   * Semantic diff: red = words removed from old, green = words added in new.
-   * Uses LCS (order-sensitive) so replacements are correct: e.g. "permitted" -> "change"
-   * flags "permitted" red and "change" green even if "change" exists elsewhere in old.
-   * Only the first occurrence of each distinct word is highlighted to avoid
-   * flooding the page when one word (e.g. "changed") is repeated many times.
-   */
-  function pageWordStreamDiff(linesOld, linesNew) {
-    var removedRects = [];
-    var addedRects = [];
-    var removedWordCount = 0;
-    var addedWordCount = 0;
-    var oldStream = buildPageWordStream(linesOld);
-    var newStream = buildPageWordStream(linesNew);
-    var lcs = wordLCS(oldStream.words, newStream.words);
-
-    // Removed: old word not in LCS. Highlight only first occurrence per distinct word.
-    var removedHighlighted = {};
-    for (var i = 0; i < oldStream.words.length; i++) {
-      if (lcs.oldInLCS[i]) continue;
-      removedWordCount++;
-      var n = normWord(oldStream.words[i]);
-      if (!removedHighlighted[n]) {
-        removedHighlighted[n] = true;
-        var oldLine = linesOld[oldStream.meta[i].lineIdx];
-        var oldWR = getWordRectsForLine(oldLine);
-        var wordIdx = oldStream.meta[i].wordIdx;
-        if (oldWR[wordIdx]) removedRects = removedRects.concat(oldWR[wordIdx]);
-      }
-    }
-
-    // Added: new word not in LCS. Highlight only first occurrence per distinct word.
-    var addedHighlighted = {};
-    for (var j = 0; j < newStream.words.length; j++) {
-      if (lcs.newInLCS[j]) continue;
-      addedWordCount++;
-      var n = normWord(newStream.words[j]);
-      if (!addedHighlighted[n]) {
-        addedHighlighted[n] = true;
-        var newLine = linesNew[newStream.meta[j].lineIdx];
-        var newWR = getWordRectsForLine(newLine);
-        var newWordIdx = newStream.meta[j].wordIdx;
-        if (newWR[newWordIdx]) addedRects = addedRects.concat(newWR[newWordIdx]);
-      }
-    }
-
-    return { removedRects: removedRects, addedRects: addedRects, removedWordCount: removedWordCount, addedWordCount: addedWordCount };
-  }
-
-  function renderPageWithHighlights(page, vp, rects, fill) {
-    var c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
-    var ctx = c.getContext('2d');
-    ctx.fillStyle = 'white'; ctx.fillRect(0, 0, c.width, c.height);
-    return page.render({ canvasContext: ctx, viewport: vp }).promise.then(function () {
-      ctx.fillStyle = fill;
-      rects.forEach(function (r) { var v = pdfRectToViewport(r, vp); ctx.fillRect(v.x, v.y, v.w, v.h); });
-      return { canvas: c, width: c.width, height: c.height };
-    });
-  }
-
-  function runSemanticOnePage(pdf1PageNum, pdf2PageNum) {
-    return Promise.all([pdfDoc1.getPage(pdf1PageNum), pdfDoc2.getPage(pdf2PageNum)])
-      .then(function (pages) {
-        var vp1 = pages[0].getViewport({ scale: DPI_SCALE });
-        var vp2 = pages[1].getViewport({ scale: DPI_SCALE });
-        return Promise.all([getTextLinesFromPage(pages[0]), getTextLinesFromPage(pages[1])])
-          .then(function (arr) {
-            var linesOld = arr[0], linesNew = arr[1];
-            var diff = pageWordStreamDiff(linesOld, linesNew);
-            return Promise.all([
-              renderPageWithHighlights(pages[0], vp1, diff.removedRects, 'rgba(220,53,69,0.35)'),
-              renderPageWithHighlights(pages[1], vp2, diff.addedRects, 'rgba(40,167,69,0.35)')
-            ]).then(function (out) {
-              return {
-                canvasOld: out[0].canvas,
-                canvasNew: out[1].canvas,
-                removedCount: diff.removedWordCount,
-                addedCount: diff.addedWordCount,
-                removedWordCount: diff.removedWordCount,
-                addedWordCount: diff.addedWordCount,
-                removedLines: [],
-                addedLines: []
-              };
-            });
-          });
-      });
-  }
-
-  function createBlankCanvas(w, h) {
-    var c = document.createElement('canvas');
-    c.width = w;
-    c.height = h;
-    var ctx = c.getContext('2d');
-    ctx.fillStyle = 'white';
-    ctx.fillRect(0, 0, w, h);
-    return c;
-  }
-
-  function runSemanticOneSlot(slotIndex) {
-    var slot = pageAlignment[slotIndex];
-    if (!slot) {
-      var empty = createBlankCanvas(100, 100);
-      return Promise.resolve({
-        canvasOld: empty,
-        canvasNew: empty,
-        removedCount: 0,
-        addedCount: 0,
-        removedLines: [],
-        addedLines: []
-      });
-    }
-    var p1 = slot.pdf1;
-    var p2 = slot.pdf2;
-    if (p1 !== null && p2 !== null) {
-      return runSemanticOnePage(p1, p2);
-    }
-    if (p1 !== null) {
-      return pdfDoc1.getPage(p1).then(function (page) {
-        var vp = page.getViewport({ scale: DPI_SCALE });
-        return getTextLinesFromPage(page).then(function (lines) {
-          var removedRects = lines.reduce(function (a, l) { return a.concat(l.rects); }, []);
-          var removedWordCount = lines.reduce(function (sum, l) {
-            return sum + (l.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
-          }, 0);
-          return renderPageWithHighlights(page, vp, removedRects, 'rgba(220,53,69,0.35)').then(function (out) {
-            var placeholder = createBlankCanvas(out.width, out.height);
-            return {
-              canvasOld: out.canvas,
-              canvasNew: placeholder,
-              removedCount: removedWordCount,
-              addedCount: 0,
-              removedWordCount: removedWordCount,
-              addedWordCount: 0,
-              removedLines: [],
-              addedLines: []
-            };
-          });
-        });
-      });
-    }
-    if (p2 !== null) {
-      return pdfDoc2.getPage(p2).then(function (page) {
-        var vp = page.getViewport({ scale: DPI_SCALE });
-        return getTextLinesFromPage(page).then(function (lines) {
-          var addedRects = lines.reduce(function (a, l) { return a.concat(l.rects); }, []);
-          var addedWordCount = lines.reduce(function (sum, l) {
-            return sum + (l.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
-          }, 0);
-          return renderPageWithHighlights(page, vp, addedRects, 'rgba(40,167,69,0.35)').then(function (out) {
-            var placeholder = createBlankCanvas(out.width, out.height);
-            return {
-              canvasOld: placeholder,
-              canvasNew: out.canvas,
-              removedCount: 0,
-              addedCount: addedWordCount,
-              removedWordCount: 0,
-              addedWordCount: addedWordCount,
-              removedLines: [],
-              addedLines: []
-            };
-          });
-        });
-      });
-    }
-    var empty = createBlankCanvas(100, 100);
-    return Promise.resolve({
-      canvasOld: empty,
-      canvasNew: empty,
-      removedCount: 0,
-      addedCount: 0,
-      removedLines: [],
-      addedLines: []
-    });
-  }
-
-  var SEMANTIC_CHUNK_SIZE = 3;
-
   function runSemanticComparison() {
-    semanticResultsByPage = [];
-    semanticCurrentPageIndex = 0;
-    semanticZoom1 = 1;
-    semanticZoom2 = 1;
-    if (file1Object) semanticFilename1El.textContent = file1Object.name;
-    if (file2Object) semanticFilename2El.textContent = file2Object.name;
-    setLoading(true);
-
-    function processChunk(start) {
-      if (start >= totalPages) {
-        return Promise.resolve();
-      }
-      var end = Math.min(start + SEMANTIC_CHUNK_SIZE, totalPages);
-      var chunkPromises = [];
-      for (var i = start; i < end; i++) {
-        chunkPromises.push(runSemanticOneSlot(i));
-      }
-      return Promise.all(chunkPromises)
-        .then(function (chunkResults) {
-          for (var k = 0; k < chunkResults.length; k++) {
-            semanticResultsByPage[start + k] = chunkResults[k];
-          }
-          return new Promise(function (resolve) {
-            setTimeout(function () {
-              resolve(processChunk(end));
-            }, 0);
-          });
-        });
+    if (!file1Object || !file2Object) {
+      showError('No files selected.');
+      setLoading(false);
+      return;
     }
+    var email = diffcheckerEmail ? (diffcheckerEmail.value || '').trim() : '';
+    if (!email) {
+      showError('Please enter your email above. The Diffchecker API requires it for Semantic comparison.');
+      return;
+    }
+    if (semanticFilename1El) semanticFilename1El.textContent = file1Object.name;
+    if (semanticFilename2El) semanticFilename2El.textContent = file2Object.name;
+    setLoading(true);
+    if (semanticPanelsWrap) semanticPanelsWrap.hidden = true;
+    if (semanticDiffApi) semanticDiffApi.hidden = true;
+    if (semanticDiffApiContent) semanticDiffApiContent.innerHTML = '';
+    if (semanticDiffApiStyle) semanticDiffApiStyle.textContent = '';
 
-    processChunk(0)
-      .then(function () {
-        drawSemanticAllPages(semanticResultsByPage);
-        updateSemanticReport();
-        updateSemanticNav();
-        cacheSemantic();
+    fetchDiffcheckerPdf(file1Object, file2Object, email)
+      .then(function (result) {
+        if (semanticDiffApiStyle) {
+          semanticDiffApiStyle.textContent = (result.css || '') +
+            '\n\n/* Force readable text (black on white) */\n' +
+            '.semantic-diff-api-content, .semantic-diff-api-content * { color: #1a1a1a !important; }\n';
+        }
+        if (semanticDiffApiContent) semanticDiffApiContent.innerHTML = result.html || '';
+        if (semanticDiffApi) semanticDiffApi.hidden = false;
+        updateSemanticReportFromApi(result.added, result.removed);
+        cachedSemantic = {
+          type: 'api',
+          html: result.html,
+          css: result.css,
+          added: result.added,
+          removed: result.removed
+        };
       })
-      .catch(function (e) { showError(e && e.message || 'Semantic comparison failed.'); })
+      .catch(function (e) {
+        showError(e && e.message ? e.message : 'Semantic comparison failed. The Diffchecker API may be unavailable or CORS may block this request.');
+        if (semanticPanelsWrap) semanticPanelsWrap.hidden = false;
+      })
       .finally(function () { setLoading(false); });
   }
 
-  function drawSemanticAllPages(allPages) {
-    if (!allPages || !allPages.length) return;
-    
-    // Calculate total height and max width
-    var maxWidth = 0;
-    var totalHeight = 0;
-    allPages.forEach(function (p) {
-      maxWidth = Math.max(maxWidth, p.canvasOld.width, p.canvasNew.width);
-      totalHeight += Math.max(p.canvasOld.height, p.canvasNew.height);
-    });
-    
-    // Create continuous canvases
-    var c1 = document.createElement('canvas');
-    c1.width = maxWidth;
-    c1.height = totalHeight;
-    var ctx1 = c1.getContext('2d');
-    ctx1.fillStyle = 'white';
-    ctx1.fillRect(0, 0, c1.width, c1.height);
-    
-    var c2 = document.createElement('canvas');
-    c2.width = maxWidth;
-    c2.height = totalHeight;
-    var ctx2 = c2.getContext('2d');
-    ctx2.fillStyle = 'white';
-    ctx2.fillRect(0, 0, c2.width, c2.height);
-    
-    // Stack pages vertically with consistent row height per slot so both panels match (scroll sync)
-    var y1 = 0, y2 = 0;
-    allPages.forEach(function (p) {
-      var rowHeight = Math.max(p.canvasOld.height, p.canvasNew.height);
-      ctx1.drawImage(p.canvasOld, 0, y1);
-      ctx2.drawImage(p.canvasNew, 0, y2);
-      y1 += rowHeight;
-      y2 += rowHeight;
-    });
-    
-    // Update display canvases
-    semanticCanvas1.width = c1.width;
-    semanticCanvas1.height = c1.height;
-    semanticCanvas1.getContext('2d').drawImage(c1, 0, 0);
-    
-    semanticCanvas2.width = c2.width;
-    semanticCanvas2.height = c2.height;
-    semanticCanvas2.getContext('2d').drawImage(c2, 0, 0);
-    
-    applySemanticZoom();
+  function updateSemanticReportFromApi(added, removed) {
+    if (changeReportCountEl) {
+      var total = (added != null && removed != null) ? (added + removed) : 0;
+      changeReportCountEl.textContent = '(' + total + ')';
+    }
+    if (reportOldDiffEl) reportOldDiffEl.textContent = removed != null ? '−' + removed : '−0';
+    if (reportNewDiffEl) reportNewDiffEl.textContent = added != null ? '+' + added : '+0';
   }
 
-  function countWords(text) {
-    if (!text || !text.trim()) return 0;
-    return text.trim().split(/\s+/).filter(function (w) { return w.length > 0; }).length;
-  }
-
-  function updateSemanticReport() {
-    var remWords = 0, addWords = 0;
-    semanticResultsByPage.forEach(function (p) {
-      if (p.removedWordCount != null && p.addedWordCount != null) {
-        remWords += p.removedWordCount;
-        addWords += p.addedWordCount;
-      } else {
-        if (p.removedLines) {
-          p.removedLines.forEach(function (line) {
-            remWords += countWords(line.text);
-          });
-        }
-        if (p.addedLines) {
-          p.addedLines.forEach(function (line) {
-            addWords += countWords(line.text);
-          });
-        }
-      }
-    });
-    
-    var totalChanges = remWords + addWords;
-    changeReportCountEl.textContent = '(' + totalChanges + ')';
-    reportOldDiffEl.innerHTML = '&minus;' + remWords;
-    reportNewDiffEl.textContent = '+' + addWords;
-    if (semanticPageDisplayEl) semanticPageDisplayEl.textContent = 'All pages';
-  }
-
-  function updateSemanticNav() {
-    // Show total pages since we're displaying all pages continuously
-    semanticPageInfoEl.textContent = totalPages + ' pages';
-    semanticPrevPageBtn.disabled = true;  // No page nav needed for continuous scroll
-    semanticNextPageBtn.disabled = true;
-  }
-
-  // Semantic scroll sync
+  // Semantic scroll sync (used when canvas panels are shown; hidden when using API diff)
   if (scrollSyncCheckbox && semanticWrapper1 && semanticWrapper2) {
     var syncing = false;
     function sync(src, tgt) {
@@ -1157,51 +795,44 @@
     applySemanticZoom();
   });
 
-  function cacheSemantic() {
-    cachedSemantic = { semanticResultsByPage: semanticResultsByPage, totalPages: totalPages, semanticCurrentPageIndex: semanticCurrentPageIndex };
-  }
-
   function restoreSemantic() {
-    semanticResultsByPage = cachedSemantic.semanticResultsByPage;
-    totalPages = cachedSemantic.totalPages;
-    semanticCurrentPageIndex = cachedSemantic.semanticCurrentPageIndex;
+    if (!cachedSemantic || cachedSemantic.type !== 'api') return;
     if (file1Object) semanticFilename1El.textContent = file1Object.name;
     if (file2Object) semanticFilename2El.textContent = file2Object.name;
-    if (semanticResultsByPage && semanticResultsByPage.length) {
-      drawSemanticAllPages(semanticResultsByPage);
+    if (semanticPanelsWrap) semanticPanelsWrap.hidden = true;
+    if (semanticDiffApiStyle) {
+      semanticDiffApiStyle.textContent = (cachedSemantic.css || '') +
+        '\n\n/* Force readable text (black on white) */\n' +
+        '.semantic-diff-api-content, .semantic-diff-api-content * { color: #1a1a1a !important; }\n';
     }
-    updateSemanticNav();
-    updateSemanticReport();
+    if (semanticDiffApiContent) semanticDiffApiContent.innerHTML = cachedSemantic.html || '';
+    if (semanticDiffApi) semanticDiffApi.hidden = false;
+    updateSemanticReportFromApi(cachedSemantic.added, cachedSemantic.removed);
   }
 
   // Download report
   downloadReportBtn.addEventListener('click', function () {
-    if (!semanticResultsByPage.length) return;
     var remWords = 0, addWords = 0;
-    semanticResultsByPage.forEach(function (p) {
-      if (p.removedWordCount != null && p.addedWordCount != null) {
-        remWords += p.removedWordCount;
-        addWords += p.addedWordCount;
-      } else {
-        if (p.removedLines) {
-          p.removedLines.forEach(function (line) {
-            remWords += countWords(line.text);
-          });
+    if (cachedSemantic && cachedSemantic.type === 'api') {
+      remWords = cachedSemantic.removed != null ? cachedSemantic.removed : 0;
+      addWords = cachedSemantic.added != null ? cachedSemantic.added : 0;
+    } else {
+      if (!semanticResultsByPage.length) return;
+      semanticResultsByPage.forEach(function (p) {
+        if (p.removedWordCount != null && p.addedWordCount != null) {
+          remWords += p.removedWordCount;
+          addWords += p.addedWordCount;
         }
-        if (p.addedLines) {
-          p.addedLines.forEach(function (line) {
-            addWords += countWords(line.text);
-          });
-        }
-      }
-    });
+      });
+    }
     var lines = [
-      'PDF Comparison Report (Semantic Text)',
+      'PDF Comparison Report (Semantic Text – Diffchecker API)',
       'Original: ' + (file1Object ? file1Object.name : 'PDF 1'),
       'Modified: ' + (file2Object ? file2Object.name : 'PDF 2'),
-      '', 'Summary (across all pages):',
-      '  Words removed from Modified: ' + remWords,
-      '  Words added in Modified: ' + addWords,
+      '',
+      'Summary:',
+      '  Words removed (red): ' + remWords,
+      '  Words added (green): ' + addWords,
       '  Total word changes: ' + (remWords + addWords)
     ];
     var blob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
