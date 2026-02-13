@@ -849,6 +849,16 @@ body.has-results .page-background { padding-top: 0; }
   color: #1a1a1a !important;
 }
 
+.diff-chunk-section { margin-bottom: 2rem; }
+.diff-chunk-heading {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 0 0 0.5rem 0;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
 .semantic-panel {
   flex: 1;
   min-width: 0;

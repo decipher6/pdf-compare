@@ -82,6 +82,7 @@
 
   // Diffchecker API for PDF text diff (red = removed, green = added)
   var DIFFCHECKER_PDF_API = 'https://api.diffchecker.com/public/pdf';
+  var DIFFCHECKER_MAX_SIZE = 2 * 1024 * 1024; // 2 MB per document
 
   // ── State ───────────────────────────────────────────────
 
@@ -172,6 +173,82 @@
       r.onload = function () { resolve(r.result); };
       r.onerror = function () { reject(new Error('Failed to read file')); };
       r.readAsArrayBuffer(file);
+    });
+  }
+
+  /**
+   * Split two PDFs into chunk pairs (each chunk under maxSize bytes).
+   * Uses pdf-lib to extract page ranges. Returns Promise<Array<{ leftFile, rightFile, fromPage, toPage }>>.
+   */
+  function getChunkPairs(leftAb, rightAb, leftName, rightName, maxSize) {
+    var PDFDocument = typeof PDFLib !== 'undefined' ? PDFLib.PDFDocument : null;
+    if (!PDFDocument) return Promise.reject(new Error('pdf-lib not loaded'));
+
+    return Promise.all([
+      PDFDocument.load(leftAb),
+      PDFDocument.load(rightAb)
+    ]).then(function (docs) {
+      var leftDoc = docs[0];
+      var rightDoc = docs[1];
+      var leftPages = leftDoc.getPageCount();
+      var rightPages = rightDoc.getPageCount();
+      var maxPages = Math.max(leftPages, rightPages, 1);
+      var chunks = [];
+      var start = 0;
+
+      function createChunkPdf(sourceDoc, fromIdx, toIdx) {
+        if (fromIdx >= toIdx) {
+          return PDFDocument.create().then(function (empty) {
+            empty.addPage([612, 792]);
+            return empty.save();
+          });
+        }
+        var indices = [];
+        for (var i = fromIdx; i < toIdx; i++) indices.push(i);
+        return PDFDocument.create().then(function (newPdf) {
+          return newPdf.copyPages(sourceDoc, indices).then(function (copied) {
+            copied.forEach(function (p) { newPdf.addPage(p); });
+            return newPdf.save();
+          });
+        });
+      }
+
+      function nextChunk() {
+        if (start >= maxPages) return Promise.resolve(chunks);
+        var chunkSize = Math.min(10, maxPages - start);
+        var end = start + chunkSize;
+
+        function trySize(size) {
+          var e = start + size;
+          if (e > maxPages) e = maxPages;
+          var leftEnd = Math.min(e, leftPages);
+          var rightEnd = Math.min(e, rightPages);
+          return Promise.all([
+            createChunkPdf(leftDoc, start, leftEnd),
+            createChunkPdf(rightDoc, start, rightEnd)
+          ]).then(function (pair) {
+            var leftBytes = pair[0];
+            var rightBytes = pair[1];
+            var overLimit = leftBytes.length > maxSize || rightBytes.length > maxSize;
+            if (overLimit && size > 1) {
+              return trySize(Math.floor(size / 2) || 1);
+            }
+            if (overLimit && size === 1) {
+              start += 1;
+              return nextChunk();
+            }
+            var leftFile = new File([leftBytes], leftName.replace(/\.pdf$/i, '-chunk.pdf') || 'left-chunk.pdf', { type: 'application/pdf' });
+            var rightFile = new File([rightBytes], rightName.replace(/\.pdf$/i, '-chunk.pdf') || 'right-chunk.pdf', { type: 'application/pdf' });
+            chunks.push({ leftFile: leftFile, rightFile: rightFile, fromPage: start + 1, toPage: e });
+            start = e;
+            return nextChunk();
+          });
+        }
+
+        return trySize(chunkSize);
+      }
+
+      return nextChunk();
     });
   }
 
@@ -729,26 +806,65 @@
     if (semanticDiffApiContent) semanticDiffApiContent.innerHTML = '';
     if (semanticDiffApiStyle) semanticDiffApiStyle.textContent = '';
 
-    fetchDiffcheckerPdf(file1Object, file2Object, email)
-      .then(function (result) {
-        if (semanticDiffApiStyle) {
-          semanticDiffApiStyle.textContent = (result.css || '') +
-            '\n\n/* Force readable text (black on white) */\n' +
-            '.semantic-diff-api-content, .semantic-diff-api-content * { color: #1a1a1a !important; }\n';
-        }
-        if (semanticDiffApiContent) semanticDiffApiContent.innerHTML = result.html || '';
-        if (semanticDiffApi) semanticDiffApi.hidden = false;
-        updateSemanticReportFromApi(result.added, result.removed);
-        cachedSemantic = {
-          type: 'api',
-          html: result.html,
-          css: result.css,
-          added: result.added,
-          removed: result.removed
-        };
+    var leftSize = file1Object.size || 0;
+    var rightSize = file2Object.size || 0;
+    var useChunks = leftSize > DIFFCHECKER_MAX_SIZE || rightSize > DIFFCHECKER_MAX_SIZE;
+
+    function applyResult(combined) {
+      var css = combined.css || '';
+      var html = combined.html || '';
+      var added = combined.added != null ? combined.added : 0;
+      var removed = combined.removed != null ? combined.removed : 0;
+      if (semanticDiffApiStyle) {
+        semanticDiffApiStyle.textContent = css +
+          '\n\n/* Force readable text (black on white) */\n' +
+          '.semantic-diff-api-content, .semantic-diff-api-content * { color: #1a1a1a !important; }\n';
+      }
+      if (semanticDiffApiContent) semanticDiffApiContent.innerHTML = html;
+      if (semanticDiffApi) semanticDiffApi.hidden = false;
+      updateSemanticReportFromApi(added, removed);
+      cachedSemantic = { type: 'api', html: html, css: css, added: added, removed: removed };
+    }
+
+    if (!useChunks) {
+      fetchDiffcheckerPdf(file1Object, file2Object, email)
+        .then(applyResult)
+        .catch(function (e) {
+          showError(e && e.message ? e.message : 'Semantic comparison failed. The Diffchecker API may be unavailable or CORS may block this request.');
+          if (semanticPanelsWrap) semanticPanelsWrap.hidden = false;
+        })
+        .finally(function () { setLoading(false); });
+      return;
+    }
+
+    Promise.all([readFileAsArrayBuffer(file1Object), readFileAsArrayBuffer(file2Object)])
+      .then(function (bufs) {
+        return getChunkPairs(
+          bufs[0], bufs[1],
+          file1Object.name || 'left.pdf',
+          file2Object.name || 'right.pdf',
+          DIFFCHECKER_MAX_SIZE
+        );
       })
+      .then(function (chunkPairs) {
+        if (!chunkPairs.length) return applyResult({ html: '', css: '', added: 0, removed: 0 });
+        var combined = { html: '', css: '', added: 0, removed: 0 };
+        var seq = chunkPairs.map(function (cp, i) {
+          return fetchDiffcheckerPdf(cp.leftFile, cp.rightFile, email).then(function (r) {
+            var part = (r.html || '').trim();
+            if (part) {
+              combined.html += '<div class="diff-chunk-section" data-pages="' + cp.fromPage + '-' + cp.toPage + '"><p class="diff-chunk-heading">Pages ' + cp.fromPage + '–' + cp.toPage + '</p>' + part + '</div>';
+            }
+            if (!combined.css && (r.css || '').trim()) combined.css = r.css;
+            combined.added += (r.added != null ? r.added : 0);
+            combined.removed += (r.removed != null ? r.removed : 0);
+          });
+        });
+        return Promise.all(seq).then(function () { return combined; });
+      })
+      .then(applyResult)
       .catch(function (e) {
-        showError(e && e.message ? e.message : 'Semantic comparison failed. The Diffchecker API may be unavailable or CORS may block this request.');
+        showError(e && e.message ? e.message : 'Semantic comparison failed. Large PDFs were split into chunks; the API or pdf-lib may have failed.');
         if (semanticPanelsWrap) semanticPanelsWrap.hidden = false;
       })
       .finally(function () { setLoading(false); });
