@@ -502,6 +502,24 @@
 
   function normText(s) { return (s || '').trim().replace(/\s+/g, ' '); }
 
+  /**
+   * Normalize word for comparison so the same visual word from both PDFs always matches.
+   * Lowercase, collapse all whitespace (including nbsp), strip zero-width/invisible chars, Unicode NFKC, then strip leading/trailing punctuation.
+   */
+  function normWord(w) {
+    if (!w || !(w + '').length) return '';
+    var s = (w + '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase()
+      .replace(/[\u200b-\u200d\ufeff\u00ad]/g, '');
+    if (typeof s.normalize === 'function') s = s.normalize('NFKC');
+    var start = 0, end = s.length;
+    while (start < end && /[^\w\u00c0-\u024f]/.test(s[start])) start++;
+    while (end > start && /[^\w\u00c0-\u024f]/.test(s[end - 1])) end--;
+    return end > start ? s.substring(start, end) : s;
+  }
+
   function getTextLinesFromPage(page) {
     return page.getTextContent().then(function (content) {
       var items = content.items || [];
@@ -646,28 +664,48 @@
 
   /**
    * Returns an array of arrays: wordRects[i] = rects for the i-th word in the line (by normalized text).
-   * Uses itemStrs to map character offsets to item/rect indices.
+   * When a PDF item spans multiple words, we give each word only its proportional sub-rect so we never
+   * highlight a whole line for one word.
    */
   function getWordRectsForLine(line) {
     var words = (line.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
     if (!words.length || !line.rects || !line.rects.length) return words.map(function () { return []; });
     var itemStrs = line.itemStrs || [];
-    if (itemStrs.length !== line.rects.length) return words.map(function (_, i) { return i === 0 ? line.rects.slice() : []; });
+    if (itemStrs.length !== line.rects.length) {
+      // Don't give the first word the whole line - split proportionally by word length
+      var totalLen = words.reduce(function (s, w) { return s + w.length; }, 0);
+      if (totalLen <= 0) return words.map(function () { return []; });
+      var lineX = Infinity, lineY = Infinity, lineRight = -Infinity, lineBottom = -Infinity;
+      line.rects.forEach(function (r) {
+        lineX = Math.min(lineX, r.x);
+        lineY = Math.min(lineY, r.y);
+        lineRight = Math.max(lineRight, r.x + r.w);
+        lineBottom = Math.max(lineBottom, r.y + r.h);
+      });
+      var lineW = lineRight - lineX, lineH = lineBottom - lineY;
+      var wordRects = [], offset = 0;
+      for (var wi = 0; wi < words.length; wi++) {
+        var frac = words[wi].length / totalLen;
+        wordRects.push([{ x: lineX + (offset / totalLen) * lineW, y: lineY, w: frac * lineW, h: lineH }]);
+        offset += words[wi].length;
+      }
+      return wordRects;
+    }
     var text = line.text || itemStrs.join('');
     var norm = '';
     var normToText = [];
-    var i = 0;
-    while (i < text.length && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n')) i++;
-    for (; i < text.length; i++) {
-      var c = text[i];
+    var idx = 0;
+    while (idx < text.length && (text[idx] === ' ' || text[idx] === '\t' || text[idx] === '\n')) idx++;
+    for (; idx < text.length; idx++) {
+      var c = text[idx];
       if (c === ' ' || c === '\t' || c === '\n') {
         if (norm.length > 0 && norm[norm.length - 1] !== ' ') {
           norm += ' ';
-          normToText.push(i);
+          normToText.push(idx);
         }
       } else {
         norm += c;
-        normToText.push(i);
+        normToText.push(idx);
       }
     }
     var itemOffsets = [];
@@ -678,69 +716,155 @@
     }
     itemOffsets.push(offset);
     var wordRects = [];
+    for (var wi = 0; wi < words.length; wi++) wordRects.push([]);
+    var wordBoundaries = [];
     var wordStart = 0;
     for (var wi = 0; wi < words.length; wi++) {
       var wordEnd = wordStart + words[wi].length;
       var tStart = wordStart < normToText.length ? normToText[wordStart] : 0;
       var tEnd = wordEnd > 0 && wordEnd - 1 < normToText.length ? normToText[wordEnd - 1] + 1 : tStart;
-      var rectsForWord = [];
-      for (var k = 0; k < line.rects.length; k++) {
-        var kStart = itemOffsets[k];
-        var kEnd = itemOffsets[k + 1];
-        if (tStart < kEnd && tEnd > kStart) rectsForWord.push(line.rects[k]);
-      }
-      wordRects.push(rectsForWord);
+      wordBoundaries.push({ start: tStart, end: tEnd });
       wordStart = wordEnd + (wordEnd < norm.length && norm[wordEnd] === ' ' ? 1 : 0);
+    }
+    for (var k = 0; k < line.rects.length; k++) {
+      var kStart = itemOffsets[k];
+      var kEnd = itemOffsets[k + 1];
+      var R = line.rects[k];
+      var itemLen = kEnd - kStart;
+      if (itemLen <= 0) continue;
+      for (var wi = 0; wi < wordBoundaries.length; wi++) {
+        var wb = wordBoundaries[wi];
+        if (kStart >= wb.end || kEnd <= wb.start) continue;
+        var oStart = Math.max(kStart, wb.start);
+        var oEnd = Math.min(kEnd, wb.end);
+        var fracStart = (oStart - kStart) / itemLen;
+        var fracEnd = (oEnd - kStart) / itemLen;
+        var subW = (fracEnd - fracStart) * R.w;
+        if (subW <= 0) continue;
+        wordRects[wi].push({
+          x: R.x + fracStart * R.w,
+          y: R.y,
+          w: subW,
+          h: R.h
+        });
+      }
     }
     return wordRects;
   }
 
   /**
-   * Word-level diff between two lines. Returns { removedRects, addedRects, removedWordCount, addedWordCount }.
-   * Words are matched in order; unmatched old words -> removedRects, unmatched new words -> addedRects.
+   * LCS of two word arrays (equality via normWord). Returns which old/new indices are in the LCS.
+   * Order-sensitive: so "change" replacing "permitted" is not matched to "change" elsewhere in old.
    */
-  function wordLevelDiff(oldLine, newLine) {
+  function wordLCS(oldWords, newWords) {
+    var n = oldWords.length, m = newWords.length;
+    var dp = [];
+    var path = [];
+    for (var i = 0; i <= n; i++) {
+      dp[i] = [];
+      path[i] = [];
+      for (var j = 0; j <= m; j++) {
+        dp[i][j] = 0;
+        path[i][j] = null;
+      }
+    }
+    for (var i = 1; i <= n; i++) {
+      for (var j = 1; j <= m; j++) {
+        var matchScore = normWord(oldWords[i - 1]) === normWord(newWords[j - 1]) ? 1 : 0;
+        var best = dp[i - 1][j - 1] + matchScore;
+        path[i][j] = 'match';
+        if (dp[i - 1][j] > best) { best = dp[i - 1][j]; path[i][j] = 'only1'; }
+        if (dp[i][j - 1] > best) { best = dp[i][j - 1]; path[i][j] = 'only2'; }
+        dp[i][j] = best;
+      }
+    }
+    var oldInLCS = [], newInLCS = [];
+    for (var i = 0; i < n; i++) oldInLCS[i] = false;
+    for (var j = 0; j < m; j++) newInLCS[j] = false;
+    var i = n, j = m;
+    while (i > 0 || j > 0) {
+      var p = path[i] && path[i][j];
+      if (p === 'match') {
+        oldInLCS[i - 1] = true;
+        newInLCS[j - 1] = true;
+        i--;
+        j--;
+      } else if (p === 'only1') {
+        i--;
+      } else if (p === 'only2') {
+        j--;
+      } else {
+        if (i > 0) i--;
+        else if (j > 0) j--;
+      }
+    }
+    return { oldInLCS: oldInLCS, newInLCS: newInLCS };
+  }
+
+  /**
+   * Build a flat word stream from all lines on a page, with metadata (lineIdx, wordIdx) per word for rect lookup.
+   * Returns { words: string[], meta: { lineIdx, wordIdx }[] }.
+   */
+  function buildPageWordStream(lines) {
+    var words = [];
+    var meta = [];
+    for (var lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+      var line = lines[lineIdx];
+      var lineWords = (line.normalized || '').replace(/\s+/g, ' ').trim().split(/\s+/).filter(function (w) { return w.length > 0; });
+      for (var wordIdx = 0; wordIdx < lineWords.length; wordIdx++) {
+        words.push(lineWords[wordIdx]);
+        meta.push({ lineIdx: lineIdx, wordIdx: wordIdx });
+      }
+    }
+    return { words: words, meta: meta };
+  }
+
+  /**
+   * Semantic diff: red = words removed from old, green = words added in new.
+   * Uses LCS (order-sensitive) so replacements are correct: e.g. "permitted" -> "change"
+   * flags "permitted" red and "change" green even if "change" exists elsewhere in old.
+   * Only the first occurrence of each distinct word is highlighted to avoid
+   * flooding the page when one word (e.g. "changed") is repeated many times.
+   */
+  function pageWordStreamDiff(linesOld, linesNew) {
     var removedRects = [];
     var addedRects = [];
     var removedWordCount = 0;
     var addedWordCount = 0;
-    if (!oldLine && !newLine) return { removedRects: removedRects, addedRects: addedRects, removedWordCount: 0, addedWordCount: 0 };
-    if (!oldLine) {
-      if (newLine.rects) addedRects = newLine.rects.slice();
-      addedWordCount = (newLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
-      return { removedRects: removedRects, addedRects: addedRects, removedWordCount: 0, addedWordCount: addedWordCount };
-    }
-    if (!newLine) {
-      if (oldLine.rects) removedRects = oldLine.rects.slice();
-      removedWordCount = (oldLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
-      return { removedRects: removedRects, addedRects: addedRects, removedWordCount: removedWordCount, addedWordCount: 0 };
-    }
-    var oldWords = (oldLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
-    var newWords = (newLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
-    var oldWR = getWordRectsForLine(oldLine);
-    var newWR = getWordRectsForLine(newLine);
-    var newUsed = [];
-    for (var j = 0; j < newWords.length; j++) newUsed[j] = false;
-    for (var oi = 0; oi < oldWords.length; oi++) {
-      var matched = false;
-      for (var j = 0; j < newWords.length; j++) {
-        if (!newUsed[j] && oldWords[oi] === newWords[j]) {
-          newUsed[j] = true;
-          matched = true;
-          break;
-        }
-      }
-      if (!matched && oldWR[oi]) {
-        removedRects = removedRects.concat(oldWR[oi]);
-        removedWordCount++;
+    var oldStream = buildPageWordStream(linesOld);
+    var newStream = buildPageWordStream(linesNew);
+    var lcs = wordLCS(oldStream.words, newStream.words);
+
+    // Removed: old word not in LCS. Highlight only first occurrence per distinct word.
+    var removedHighlighted = {};
+    for (var i = 0; i < oldStream.words.length; i++) {
+      if (lcs.oldInLCS[i]) continue;
+      removedWordCount++;
+      var n = normWord(oldStream.words[i]);
+      if (!removedHighlighted[n]) {
+        removedHighlighted[n] = true;
+        var oldLine = linesOld[oldStream.meta[i].lineIdx];
+        var oldWR = getWordRectsForLine(oldLine);
+        var wordIdx = oldStream.meta[i].wordIdx;
+        if (oldWR[wordIdx]) removedRects = removedRects.concat(oldWR[wordIdx]);
       }
     }
-    for (var j = 0; j < newWords.length; j++) {
-      if (!newUsed[j] && newWR[j]) {
-        addedRects = addedRects.concat(newWR[j]);
-        addedWordCount++;
+
+    // Added: new word not in LCS. Highlight only first occurrence per distinct word.
+    var addedHighlighted = {};
+    for (var j = 0; j < newStream.words.length; j++) {
+      if (lcs.newInLCS[j]) continue;
+      addedWordCount++;
+      var n = normWord(newStream.words[j]);
+      if (!addedHighlighted[n]) {
+        addedHighlighted[n] = true;
+        var newLine = linesNew[newStream.meta[j].lineIdx];
+        var newWR = getWordRectsForLine(newLine);
+        var newWordIdx = newStream.meta[j].wordIdx;
+        if (newWR[newWordIdx]) addedRects = addedRects.concat(newWR[newWordIdx]);
       }
     }
+
     return { removedRects: removedRects, addedRects: addedRects, removedWordCount: removedWordCount, addedWordCount: addedWordCount };
   }
 
@@ -763,31 +887,18 @@
         return Promise.all([getTextLinesFromPage(pages[0]), getTextLinesFromPage(pages[1])])
           .then(function (arr) {
             var linesOld = arr[0], linesNew = arr[1];
-            var removedRects = [];
-            var addedRects = [];
-            var removedWordCount = 0;
-            var addedWordCount = 0;
-            var maxLines = Math.max(linesOld.length, linesNew.length);
-            for (var i = 0; i < maxLines; i++) {
-              var oldLine = i < linesOld.length ? linesOld[i] : null;
-              var newLine = i < linesNew.length ? linesNew[i] : null;
-              var diff = wordLevelDiff(oldLine, newLine);
-              removedRects = removedRects.concat(diff.removedRects);
-              addedRects = addedRects.concat(diff.addedRects);
-              removedWordCount += diff.removedWordCount;
-              addedWordCount += diff.addedWordCount;
-            }
+            var diff = pageWordStreamDiff(linesOld, linesNew);
             return Promise.all([
-              renderPageWithHighlights(pages[0], vp1, removedRects, 'rgba(220,53,69,0.35)'),
-              renderPageWithHighlights(pages[1], vp2, addedRects, 'rgba(40,167,69,0.35)')
+              renderPageWithHighlights(pages[0], vp1, diff.removedRects, 'rgba(220,53,69,0.35)'),
+              renderPageWithHighlights(pages[1], vp2, diff.addedRects, 'rgba(40,167,69,0.35)')
             ]).then(function (out) {
               return {
                 canvasOld: out[0].canvas,
                 canvasNew: out[1].canvas,
-                removedCount: removedWordCount,
-                addedCount: addedWordCount,
-                removedWordCount: removedWordCount,
-                addedWordCount: addedWordCount,
+                removedCount: diff.removedWordCount,
+                addedCount: diff.addedWordCount,
+                removedWordCount: diff.removedWordCount,
+                addedWordCount: diff.addedWordCount,
                 removedLines: [],
                 addedLines: []
               };
@@ -883,6 +994,8 @@
     });
   }
 
+  var SEMANTIC_CHUNK_SIZE = 3;
+
   function runSemanticComparison() {
     semanticResultsByPage = [];
     semanticCurrentPageIndex = 0;
@@ -891,17 +1004,32 @@
     if (file1Object) semanticFilename1El.textContent = file1Object.name;
     if (file2Object) semanticFilename2El.textContent = file2Object.name;
     setLoading(true);
-    
-    var promises = [];
-    for (var i = 0; i < totalPages; i++) {
-      promises.push(runSemanticOneSlot(i));
+
+    function processChunk(start) {
+      if (start >= totalPages) {
+        return Promise.resolve();
+      }
+      var end = Math.min(start + SEMANTIC_CHUNK_SIZE, totalPages);
+      var chunkPromises = [];
+      for (var i = start; i < end; i++) {
+        chunkPromises.push(runSemanticOneSlot(i));
+      }
+      return Promise.all(chunkPromises)
+        .then(function (chunkResults) {
+          for (var k = 0; k < chunkResults.length; k++) {
+            semanticResultsByPage[start + k] = chunkResults[k];
+          }
+          return new Promise(function (resolve) {
+            setTimeout(function () {
+              resolve(processChunk(end));
+            }, 0);
+          });
+        });
     }
-    
-    Promise.all(promises)
-      .then(function (allPages) {
-        semanticResultsByPage = allPages;
-        // Stack all pages vertically into continuous canvases
-        drawSemanticAllPages(allPages);
+
+    processChunk(0)
+      .then(function () {
+        drawSemanticAllPages(semanticResultsByPage);
         updateSemanticReport();
         updateSemanticNav();
         cacheSemantic();
