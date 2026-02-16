@@ -496,6 +496,49 @@
       .finally(function () { setLoading(false); downloadBtn.disabled = false; });
   });
 
+  function myersDiff(oldWords, newWords) {
+    const n = oldWords.length;
+    const m = newWords.length;
+    const max = n + m;
+    if (max === 0) return [];
+    const v = new Array(2 * max + 1).fill(0);
+    const trace = [];
+    outer: for (let d = 0; d <= max; d++) {
+      trace.push([...v]);
+      for (let k = -d; k <= d; k += 2) {
+        const idx = k + max;
+        let x;
+        if (k === -d || (k !== d && v[idx - 1] < v[idx + 1])) { x = v[idx + 1]; }
+        else { x = v[idx - 1] + 1; }
+        let y = x - k;
+        while (x < n && y < m && oldWords[x] === newWords[y]) { x++; y++; }
+        v[idx] = x;
+        if (x >= n && y >= m) break outer;
+      }
+    }
+    const ops = [];
+    let x = n, y = m;
+    for (let d = trace.length - 1; d >= 0 && (x > 0 || y > 0); d--) {
+      const vSnap = trace[d];
+      const k = x - y;
+      const idx = k + max;
+      let prevK;
+      if (k === -d || (k !== d && vSnap[idx - 1] < vSnap[idx + 1])) { prevK = k + 1; }
+      else { prevK = k - 1; }
+      const prevX = vSnap[prevK + max];
+      const prevY = prevX - prevK;
+      while (x > prevX + (prevK === k - 1 ? 1 : 0) && y > prevY + (prevK === k + 1 ? 1 : 0)) {
+        x--; y--;
+        ops.unshift({ type: 'equal', value: oldWords[x] });
+      }
+      if (d > 0) {
+        if (prevK === k - 1) { x--; ops.unshift({ type: 'remove', value: oldWords[x] }); }
+        else { y--; ops.unshift({ type: 'add', value: newWords[y] }); }
+      }
+    }
+    return ops;
+  }
+
   // ===== SEMANTIC COMPARISON ==============================
 
   var LINE_Y_TOLERANCE = 3;
@@ -644,104 +687,37 @@
     return { x: rect.x * s, y: vh - (rect.y + rect.h) * s, w: rect.w * s, h: rect.h * s };
   }
 
-  /**
-   * Returns an array of arrays: wordRects[i] = rects for the i-th word in the line (by normalized text).
-   * Uses itemStrs to map character offsets to item/rect indices.
-   */
-  function getWordRectsForLine(line) {
-    var words = (line.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
-    if (!words.length || !line.rects || !line.rects.length) return words.map(function () { return []; });
-    var itemStrs = line.itemStrs || [];
-    if (itemStrs.length !== line.rects.length) return words.map(function (_, i) { return i === 0 ? line.rects.slice() : []; });
-    var text = line.text || itemStrs.join('');
-    var norm = '';
-    var normToText = [];
-    var i = 0;
-    while (i < text.length && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n')) i++;
-    for (; i < text.length; i++) {
-      var c = text[i];
-      if (c === ' ' || c === '\t' || c === '\n') {
-        if (norm.length > 0 && norm[norm.length - 1] !== ' ') {
-          norm += ' ';
-          normToText.push(i);
-        }
-      } else {
-        norm += c;
-        normToText.push(i);
-      }
-    }
-    var itemOffsets = [];
-    var offset = 0;
-    for (var k = 0; k < itemStrs.length; k++) {
-      itemOffsets.push(offset);
-      offset += itemStrs[k].length;
-    }
-    itemOffsets.push(offset);
-    var wordRects = [];
-    var wordStart = 0;
-    for (var wi = 0; wi < words.length; wi++) {
-      var wordEnd = wordStart + words[wi].length;
-      var tStart = wordStart < normToText.length ? normToText[wordStart] : 0;
-      var tEnd = wordEnd > 0 && wordEnd - 1 < normToText.length ? normToText[wordEnd - 1] + 1 : tStart;
-      var rectsForWord = [];
-      for (var k = 0; k < line.rects.length; k++) {
-        var kStart = itemOffsets[k];
-        var kEnd = itemOffsets[k + 1];
-        if (tStart < kEnd && tEnd > kStart) rectsForWord.push(line.rects[k]);
-      }
-      wordRects.push(rectsForWord);
-      wordStart = wordEnd + (wordEnd < norm.length && norm[wordEnd] === ' ' ? 1 : 0);
-    }
-    return wordRects;
-  }
-
-  /**
-   * Word-level diff between two lines. Returns { removedRects, addedRects, removedWordCount, addedWordCount }.
-   * Words are matched in order; unmatched old words -> removedRects, unmatched new words -> addedRects.
-   */
-  function wordLevelDiff(oldLine, newLine) {
-    var removedRects = [];
-    var addedRects = [];
-    var removedWordCount = 0;
-    var addedWordCount = 0;
-    if (!oldLine && !newLine) return { removedRects: removedRects, addedRects: addedRects, removedWordCount: 0, addedWordCount: 0 };
-    if (!oldLine) {
-      if (newLine.rects) addedRects = newLine.rects.slice();
-      addedWordCount = (newLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
-      return { removedRects: removedRects, addedRects: addedRects, removedWordCount: 0, addedWordCount: addedWordCount };
-    }
-    if (!newLine) {
-      if (oldLine.rects) removedRects = oldLine.rects.slice();
-      removedWordCount = (oldLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
-      return { removedRects: removedRects, addedRects: addedRects, removedWordCount: removedWordCount, addedWordCount: 0 };
-    }
-    var oldWords = (oldLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
-    var newWords = (newLine.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; });
-    var oldWR = getWordRectsForLine(oldLine);
-    var newWR = getWordRectsForLine(newLine);
-    var newUsed = [];
-    for (var j = 0; j < newWords.length; j++) newUsed[j] = false;
-    for (var oi = 0; oi < oldWords.length; oi++) {
-      var matched = false;
-      for (var j = 0; j < newWords.length; j++) {
-        if (!newUsed[j] && oldWords[oi] === newWords[j]) {
-          newUsed[j] = true;
-          matched = true;
-          break;
-        }
-      }
-      if (!matched && oldWR[oi]) {
-        removedRects = removedRects.concat(oldWR[oi]);
-        removedWordCount++;
-      }
-    }
-    for (var j = 0; j < newWords.length; j++) {
-      if (!newUsed[j] && newWR[j]) {
-        addedRects = addedRects.concat(newWR[j]);
-        addedWordCount++;
-      }
-    }
-    return { removedRects: removedRects, addedRects: addedRects, removedWordCount: removedWordCount, addedWordCount: addedWordCount };
+  function getWordRectsFlat(page) {
+    return page.getTextContent().then(function (content) {
+      var words = [];
+      var items = (content.items || []).slice().sort(function (a, b) {
+        var ay = a.transform[5], by = b.transform[5];
+        var ax = a.transform[4], bx = b.transform[4];
+        if (Math.abs(ay - by) > 3) return by - ay;  // top to bottom
+        return ax - bx;                              // left to right
+      });
+      items.forEach(function (item) {
+        if (!item.str || !item.str.trim()) return;
+        var t = item.transform;
+        var itemX = t[4], itemY = t[5];
+        var itemH = item.height || 12;
+        var itemW = item.width || 0;
+        var totalChars = item.str.length;
+        var chunks = item.str.split(/(\s+)/);
+        var offsetX = 0;
+        chunks.forEach(function (chunk) {
+          var chunkW = (chunk.length / Math.max(totalChars, 1)) * itemW;
+          if (chunk.trim()) {
+            words.push({
+              word: chunk.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '') || chunk,
+              rect: { x: itemX + offsetX, y: itemY - itemH, w: chunkW, h: itemH }
+            });
+          }
+          offsetX += chunkW;
+        });
+      });
+      return words;
+    });
   }
 
   function renderPageWithHighlights(page, vp, rects, fill) {
@@ -760,26 +736,24 @@
       .then(function (pages) {
         var vp1 = pages[0].getViewport({ scale: DPI_SCALE });
         var vp2 = pages[1].getViewport({ scale: DPI_SCALE });
-        return Promise.all([getTextLinesFromPage(pages[0]), getTextLinesFromPage(pages[1])])
+        return Promise.all([getWordRectsFlat(pages[0]), getWordRectsFlat(pages[1])])
           .then(function (arr) {
-            var linesOld = arr[0], linesNew = arr[1];
-            var removedRects = [];
-            var addedRects = [];
-            var removedWordCount = 0;
-            var addedWordCount = 0;
-            var maxLines = Math.max(linesOld.length, linesNew.length);
-            for (var i = 0; i < maxLines; i++) {
-              var oldLine = i < linesOld.length ? linesOld[i] : null;
-              var newLine = i < linesNew.length ? linesNew[i] : null;
-              var diff = wordLevelDiff(oldLine, newLine);
-              removedRects = removedRects.concat(diff.removedRects);
-              addedRects = addedRects.concat(diff.addedRects);
-              removedWordCount += diff.removedWordCount;
-              addedWordCount += diff.addedWordCount;
-            }
+            var wordsOld = arr[0], wordsNew = arr[1];
+            var ops = myersDiff(
+              wordsOld.map(function (w) { return w.word; }),
+              wordsNew.map(function (w) { return w.word; })
+            );
+            var removedRects = [], addedRects = [];
+            var removedWordCount = 0, addedWordCount = 0;
+            var idx1 = 0, idx2 = 0;
+            ops.forEach(function (op) {
+              if (op.type === 'equal')        { idx1++; idx2++; }
+              else if (op.type === 'remove')  { removedRects.push(wordsOld[idx1].rect); removedWordCount++; idx1++; }
+              else if (op.type === 'add')     { addedRects.push(wordsNew[idx2].rect);   addedWordCount++;   idx2++; }
+            });
             return Promise.all([
-              renderPageWithHighlights(pages[0], vp1, removedRects, 'rgba(220,53,69,0.35)'),
-              renderPageWithHighlights(pages[1], vp2, addedRects, 'rgba(40,167,69,0.35)')
+              renderPageWithHighlights(pages[0], vp1, removedRects, 'rgba(220,53,69,0.4)'),
+              renderPageWithHighlights(pages[1], vp2, addedRects, 'rgba(40,167,69,0.4)')
             ]).then(function (out) {
               return {
                 canvasOld: out[0].canvas,
