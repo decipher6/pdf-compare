@@ -687,6 +687,30 @@
     return { x: rect.x * s, y: vh - (rect.y + rect.h) * s, w: rect.w * s, h: rect.h * s };
   }
 
+  /**
+   * Normalize a word string for diffing only. Reduces "looks same, compares different" false positives.
+   * - Unicode NFKC; ligatures → plain (ﬁ→fi, ﬂ→fl, etc.); fancy quotes/dashes → plain
+   * - Ellipsis, non-breaking hyphen; whitespace (including NBSP) normalized and collapsed
+   * - Punctuation is preserved (PDF-safe: emails, numbers, citations, etc.)
+   */
+  function normalizeWordForDiff(str) {
+    if (typeof str !== 'string') return '';
+    var s = str.normalize('NFKC');
+    s = s.replace(/\uFB01/g, 'fi').replace(/\uFB02/g, 'fl').replace(/\uFB00/g, 'ff')
+      .replace(/\uFB03/g, 'ffi').replace(/\uFB04/g, 'ffl');
+    s = s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"')
+      .replace(/[\u2010-\u2014\u2212\u00AD]/g, '-');  // include non-breaking hyphen U+00AD
+    s = s.replace(/\u2026/g, '...');  // ellipsis → three dots
+    s = s.replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, ' ').replace(/\s+/g, ' ').trim();
+    return s;
+  }
+
+  /** Normalize a full line string for diffing (same rules as normalizeWordForDiff for consistency). */
+  function normalizeLineForDiff(str) {
+    if (typeof str !== 'string') return '';
+    return normalizeWordForDiff(str);
+  }
+
   function getWordRectsFlat(page) {
     return page.getTextContent().then(function (content) {
       var words = [];
@@ -707,12 +731,13 @@
         var offsetX = 0;
         chunks.forEach(function (chunk) {
           var chunkW = (chunk.length / Math.max(totalChars, 1)) * itemW;
-          if (chunk.trim()) {
-            words.push({
-              word: chunk.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '') || chunk,
-              rect: { x: itemX + offsetX, y: itemY - itemH, w: chunkW, h: itemH }
-            });
-          }
+          if (!chunk.trim()) { offsetX += chunkW; return; }
+          var normalized = normalizeWordForDiff(chunk);
+          if (normalized === '') { offsetX += chunkW; return; }
+          words.push({
+            word: normalized,
+            rect: { x: itemX + offsetX, y: itemY - itemH, w: chunkW, h: itemH }
+          });
           offsetX += chunkW;
         });
       });
@@ -731,42 +756,117 @@
     });
   }
 
+  /** Assign each word to the first line it overlaps vertically. Returns array of word arrays per line. */
+  function assignWordsToLines(lines, words) {
+    var wordsPerLine = lines.map(function () { return []; });
+    if (!lines.length) return wordsPerLine;
+    words.forEach(function (w) {
+      var wBottom = w.rect.y, wTop = w.rect.y + w.rect.h;
+      for (var i = 0; i < lines.length; i++) {
+        var rects = lines[i].rects;
+        if (!rects.length) continue;
+        var lBottom = rects[0].y, lTop = rects[0].y + rects[0].h;
+        for (var j = 1; j < rects.length; j++) {
+          var r = rects[j];
+          if (r.y < lBottom) lBottom = r.y;
+          if (r.y + (r.h || 0) > lTop) lTop = r.y + (r.h || 0);
+        }
+        if (wTop > lBottom && wBottom < lTop) {
+          wordsPerLine[i].push(w);
+          break;
+        }
+      }
+    });
+    return wordsPerLine;
+  }
+
+  /**
+   * Run semantic comparison: line-based diff, then word-level highlighting only within changed lines.
+   * - Equal lines: no highlight.
+   * - Paired replace (remove line + add line): highlight only the differing words in those lines.
+   * - Standalone removed/added lines: highlight the whole line.
+   */
   function runSemanticOnePage(pdf1PageNum, pdf2PageNum) {
     return Promise.all([pdfDoc1.getPage(pdf1PageNum), pdfDoc2.getPage(pdf2PageNum)])
       .then(function (pages) {
         var vp1 = pages[0].getViewport({ scale: DPI_SCALE });
         var vp2 = pages[1].getViewport({ scale: DPI_SCALE });
-        return Promise.all([getWordRectsFlat(pages[0]), getWordRectsFlat(pages[1])])
-          .then(function (arr) {
-            var wordsOld = arr[0], wordsNew = arr[1];
-            var ops = myersDiff(
-              wordsOld.map(function (w) { return w.word; }),
-              wordsNew.map(function (w) { return w.word; })
-            );
-            var removedRects = [], addedRects = [];
-            var removedWordCount = 0, addedWordCount = 0;
-            var idx1 = 0, idx2 = 0;
-            ops.forEach(function (op) {
-              if (op.type === 'equal')        { idx1++; idx2++; }
-              else if (op.type === 'remove')  { removedRects.push(wordsOld[idx1].rect); removedWordCount++; idx1++; }
-              else if (op.type === 'add')     { addedRects.push(wordsNew[idx2].rect);   addedWordCount++;   idx2++; }
-            });
-            return Promise.all([
-              renderPageWithHighlights(pages[0], vp1, removedRects, 'rgba(220,53,69,0.4)'),
-              renderPageWithHighlights(pages[1], vp2, addedRects, 'rgba(40,167,69,0.4)')
-            ]).then(function (out) {
-              return {
-                canvasOld: out[0].canvas,
-                canvasNew: out[1].canvas,
-                removedCount: removedWordCount,
-                addedCount: addedWordCount,
-                removedWordCount: removedWordCount,
-                addedWordCount: addedWordCount,
-                removedLines: [],
-                addedLines: []
-              };
-            });
+        return Promise.all([
+          getTextLinesFromPage(pages[0]),
+          getTextLinesFromPage(pages[1]),
+          getWordRectsFlat(pages[0]),
+          getWordRectsFlat(pages[1])
+        ]).then(function (arr) {
+          var linesOld = arr[0], linesNew = arr[1], wordsOld = arr[2], wordsNew = arr[3];
+          var wordsPerLineOld = assignWordsToLines(linesOld, wordsOld);
+          var wordsPerLineNew = assignWordsToLines(linesNew, wordsNew);
+          var oldLineStrs = linesOld.map(function (l) { return normalizeLineForDiff(l.text); });
+          var newLineStrs = linesNew.map(function (l) { return normalizeLineForDiff(l.text); });
+          var ops = myersDiff(oldLineStrs, newLineStrs);
+
+          var removedRects = [], addedRects = [];
+          var removedWordCount = 0, addedWordCount = 0;
+          var idx1 = 0, idx2 = 0;
+          var removeRun = [], addRun = [];
+
+          function flushReplaceRun() {
+            var n = Math.min(removeRun.length, addRun.length);
+            for (var i = 0; i < n; i++) {
+              var lineOld = linesOld[removeRun[i]], lineNew = linesNew[addRun[i]];
+              var wordsO = wordsPerLineOld[removeRun[i]] || [], wordsN = wordsPerLineNew[addRun[i]] || [];
+              var oldWords = wordsO.map(function (w) { return w.word; });
+              var newWords = wordsN.map(function (w) { return w.word; });
+              var wordOps = myersDiff(oldWords, newWords);
+              var i1 = 0, i2 = 0;
+              wordOps.forEach(function (op) {
+                if (op.type === 'equal') { i1++; i2++; }
+                else if (op.type === 'remove') { removedRects.push(wordsO[i1].rect); removedWordCount++; i1++; }
+                else if (op.type === 'add') { addedRects.push(wordsN[i2].rect); addedWordCount++; i2++; }
+              });
+            }
+            for (var i = n; i < removeRun.length; i++) {
+              var line = linesOld[removeRun[i]];
+              removedRects = removedRects.concat(line.rects);
+              removedWordCount += (line.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
+            }
+            for (var i = n; i < addRun.length; i++) {
+              var line = linesNew[addRun[i]];
+              addedRects = addedRects.concat(line.rects);
+              addedWordCount += (line.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
+            }
+            removeRun = [];
+            addRun = [];
+          }
+
+          ops.forEach(function (op) {
+            if (op.type === 'equal') {
+              flushReplaceRun();
+              idx1++;
+              idx2++;
+            } else if (op.type === 'remove') {
+              removeRun.push(idx1++);
+            } else if (op.type === 'add') {
+              addRun.push(idx2++);
+            }
           });
+          flushReplaceRun();
+
+          return Promise.all([
+            renderPageWithHighlights(pages[0], vp1, removedRects, 'rgba(220,53,69,0.4)'),
+            renderPageWithHighlights(pages[1], vp2, addedRects, 'rgba(40,167,69,0.4)')
+          ]).then(function (out) {
+            return {
+              canvasOld: out[0].canvas,
+              canvasNew: out[1].canvas,
+              removedCount: removedWordCount,
+              addedCount: addedWordCount,
+              removedWordCount: removedWordCount,
+              addedWordCount: addedWordCount,
+              removedLines: [],
+              addedLines: []
+            };
+          });
+        });
       });
   }
 
