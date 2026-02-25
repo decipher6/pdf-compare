@@ -253,7 +253,9 @@
 
     Promise.all([getDocFingerprints(pdfDoc1), getDocFingerprints(pdfDoc2)])
       .then(function (arr) {
-        pageAlignment = computePageAlignment(arr[0], arr[1]);
+        var fp1 = arr[0], fp2 = arr[1];
+        pageAlignment = computePageAlignment(fp1, fp2);
+        pageAlignment = expandWeakPairsToBlanks(fp1, fp2, pageAlignment);
         totalPages = pageAlignment.length;
         if (totalPages === 0) {
           showError('Could not align any pages.');
@@ -541,9 +543,41 @@
 
   // ===== SEMANTIC COMPARISON ==============================
 
-  var LINE_Y_TOLERANCE = 3;
+  var LINE_Y_TOLERANCE = 5;
 
   function normText(s) { return (s || '').trim().replace(/\s+/g, ' '); }
+
+  function computeDynamicYTolerance(items) {
+    var heights = [];
+    for (var i = 0; i < items.length; i++) {
+      var h = items[i].height || items[i].h || 0;
+      if (h > 0) heights.push(h);
+    }
+    if (!heights.length) return LINE_Y_TOLERANCE;
+    var avg = 0;
+    for (var j = 0; j < heights.length; j++) avg += heights[j];
+    avg /= heights.length;
+    return Math.max(LINE_Y_TOLERANCE, avg * 0.5);
+  }
+
+  function joinWithImpliedSpaces(items) {
+    if (!items.length) return '';
+    var result = items[0].str;
+    for (var i = 1; i < items.length; i++) {
+      var prev = items[i - 1];
+      var curr = items[i];
+      var prevEnd = prev.x + prev.w;
+      var gap = curr.x - prevEnd;
+      var avgCharW = prev.w / Math.max(prev.str.length, 1);
+      if (avgCharW <= 0) avgCharW = curr.w / Math.max(curr.str.length, 1);
+      if (avgCharW > 0 && gap > avgCharW * 0.25 &&
+          !/\s$/.test(prev.str) && !/^\s/.test(curr.str)) {
+        result += ' ';
+      }
+      result += curr.str;
+    }
+    return result;
+  }
 
   function getTextLinesFromPage(page) {
     return page.getTextContent().then(function (content) {
@@ -553,19 +587,20 @@
         var t = it.transform;
         return { str: it.str || '', x: t[4], y: t[5], w: it.width || 0, h: it.height || 0, pdfY: t[5], pdfBottom: t[5] - (it.height || 0) };
       });
+      var lineYTol = computeDynamicYTolerance(arr);
       arr.sort(function (a, b) {
-        if (Math.abs(a.pdfY - b.pdfY) <= LINE_Y_TOLERANCE) return a.x - b.x;
+        if (Math.abs(a.pdfY - b.pdfY) <= lineYTol) return a.x - b.x;
         return b.pdfY - a.pdfY;
       });
       var lines = [], cur = [], curY = null;
       arr.forEach(function (r) {
         if (r.str === '') return;
-        if (curY === null || Math.abs(r.pdfY - curY) <= LINE_Y_TOLERANCE) {
+        if (curY === null || Math.abs(r.pdfY - curY) <= lineYTol) {
           cur.push(r);
           if (curY === null) curY = r.pdfY;
         } else {
           if (cur.length) {
-            var txt = cur.map(function (i) { return i.str; }).join('');
+            var txt = joinWithImpliedSpaces(cur);
             var rects = cur.map(function (i) { return { x: i.x, y: i.pdfBottom, w: i.w, h: i.h }; });
             var itemStrs = cur.map(function (i) { return i.str; });
             lines.push({ text: txt, normalized: normText(txt), rects: rects, itemStrs: itemStrs });
@@ -574,7 +609,7 @@
         }
       });
       if (cur.length) {
-        var txt = cur.map(function (i) { return i.str; }).join('');
+        var txt = joinWithImpliedSpaces(cur);
         var rects = cur.map(function (i) { return { x: i.x, y: i.pdfBottom, w: i.w, h: i.h }; });
         var itemStrs = cur.map(function (i) { return i.str; });
         lines.push({ text: txt, normalized: normText(txt), rects: rects, itemStrs: itemStrs });
@@ -601,25 +636,56 @@
     return Promise.all(promises);
   }
 
-  function fingerprintSimilarity(a, b) {
-    if (!a || !b) return 0;
+  /**
+   * Returns { matchCount, ratio } for two page fingerprint strings.
+   * Used so we can require both a minimum word overlap and a ratio threshold.
+   */
+  function fingerprintSimilarityDetail(a, b) {
+    if (!a || !b) return { matchCount: 0, ratio: 0 };
     var wordsA = a.split(/\s+/).filter(function (w) { return w.length > 0; });
     var wordsB = b.split(/\s+/).filter(function (w) { return w.length > 0; });
-    if (wordsA.length === 0 && wordsB.length === 0) return 1;
-    if (wordsA.length === 0 || wordsB.length === 0) return 0;
+    if (wordsA.length === 0 && wordsB.length === 0) return { matchCount: 0, ratio: 1 };
+    if (wordsA.length === 0 || wordsB.length === 0) return { matchCount: 0, ratio: 0 };
     var setB = new Set(wordsB);
     var match = 0;
     wordsA.forEach(function (w) { if (setB.has(w)) match++; });
-    return match / Math.max(wordsA.length, wordsB.length);
+    var ratio = match / Math.max(wordsA.length, wordsB.length);
+    return { matchCount: match, ratio: ratio };
   }
 
-  var ALIGN_MATCH_THRESHOLD = 0.5;
+  var ALIGN_MATCH_THRESHOLD = 0.7;
+  var ALIGN_MIN_MATCH_WORDS = 2;
+
+  /**
+   * Expand alignment: any slot that has both pages but low similarity is split into two slots
+   * (page on one side, blank on the other) so unique slides always show with blank opposite.
+   */
+  function expandWeakPairsToBlanks(fp1, fp2, slots) {
+    var out = [];
+    for (var s = 0; s < slots.length; s++) {
+      var slot = slots[s];
+      if (slot.pdf1 !== null && slot.pdf2 !== null) {
+        var d = fingerprintSimilarityDetail(fp1[slot.pdf1 - 1], fp2[slot.pdf2 - 1]);
+        if (d.matchCount < ALIGN_MIN_MATCH_WORDS || d.ratio < ALIGN_MATCH_THRESHOLD) {
+          out.push({ pdf1: slot.pdf1, pdf2: null });
+          out.push({ pdf1: null, pdf2: slot.pdf2 });
+        } else {
+          out.push(slot);
+        }
+      } else {
+        out.push(slot);
+      }
+    }
+    return out;
+  }
 
   function computePageAlignment(fp1, fp2) {
     var n1 = fp1.length;
     var n2 = fp2.length;
     var sim = function (i, j) {
-      return fingerprintSimilarity(fp1[i], fp2[j]);
+      var d = fingerprintSimilarityDetail(fp1[i], fp2[j]);
+      if (d.matchCount < ALIGN_MIN_MATCH_WORDS || d.ratio < ALIGN_MATCH_THRESHOLD) return 0;
+      return d.ratio;
     };
     var M = [];
     var P = [];
@@ -638,7 +704,7 @@
         if (M[i][j] < 0) continue;
         if (i < n1 && j < n2) {
           var s = sim(i, j);
-          var score = M[i][j] + (s >= ALIGN_MATCH_THRESHOLD ? 1 + s : 0);
+          var score = M[i][j] + (s > 0 ? 1 + s : 0);
           if (score > M[i + 1][j + 1]) {
             M[i + 1][j + 1] = score;
             P[i + 1][j + 1] = 'match';
@@ -688,20 +754,24 @@
   }
 
   /**
-   * Normalize a word string for diffing only. Reduces "looks same, compares different" false positives.
+   * Normalize text for comparison so "same" words are not flagged different (text-based diff).
    * - Unicode NFKC; ligatures → plain (ﬁ→fi, ﬂ→fl, etc.); fancy quotes/dashes → plain
-   * - Ellipsis, non-breaking hyphen; whitespace (including NBSP) normalized and collapsed
-   * - Punctuation is preserved (PDF-safe: emails, numbers, citations, etc.)
+   * - Zero-width / joiners / BOM removed; ellipsis, non-breaking hyphen; whitespace normalized
    */
   function normalizeWordForDiff(str) {
     if (typeof str !== 'string') return '';
     var s = str.normalize('NFKC');
+    s = s.replace(/[\u200B-\u200D\uFEFF\u2060\u00AD\u034F\u061C\u180E\uFFF9-\uFFFB]/g, '');
     s = s.replace(/\uFB01/g, 'fi').replace(/\uFB02/g, 'fl').replace(/\uFB00/g, 'ff')
       .replace(/\uFB03/g, 'ffi').replace(/\uFB04/g, 'ffl');
-    s = s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"')
-      .replace(/[\u2010-\u2014\u2212\u00AD]/g, '-');  // include non-breaking hyphen U+00AD
-    s = s.replace(/\u2026/g, '...');  // ellipsis → three dots
-    s = s.replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, ' ').replace(/\s+/g, ' ').trim();
+    s = s.replace(/[\u2018\u2019\u02BC\u0060\u00B4\u2032\u275B\u275C]/g, "'")
+      .replace(/[\u201C\u201D\u00AB\u00BB\u2033\u275D\u275E\u301D\u301E]/g, '"');
+    s = s.replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-');
+    s = s.replace(/\u2026/g, '...');
+    s = s.replace(/\u00D7/g, 'x');
+    s = s.replace(/[\u2022\u2023\u25E6\u2043\u204C\u204D\u2219\u00B7\u2981\u26AB\u25AA\u25AB\u25FE\u25FD\u25FC\u25FB\u25A0\u25A1\u2B25\u2B26\u25B8\u25B9\u25BA\u25BB\u25B6\u25B7\u27A2\u25C6\u25C7\u25CF\u25CB\u25D8\u2605\u2606\u2756\u29BE\u29BF\u2713\u2714]/g, '');
+    s = s.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000\u1680]/g, ' ');
+    s = s.replace(/\s+/g, ' ').trim();
     return s;
   }
 
@@ -714,11 +784,13 @@
   function getWordRectsFlat(page) {
     return page.getTextContent().then(function (content) {
       var words = [];
-      var items = (content.items || []).slice().sort(function (a, b) {
+      var items = (content.items || []).slice();
+      var yTol = computeDynamicYTolerance(items);
+      items.sort(function (a, b) {
         var ay = a.transform[5], by = b.transform[5];
         var ax = a.transform[4], bx = b.transform[4];
-        if (Math.abs(ay - by) > 3) return by - ay;  // top to bottom
-        return ax - bx;                              // left to right
+        if (Math.abs(ay - by) > yTol) return by - ay;
+        return ax - bx;
       });
       items.forEach(function (item) {
         if (!item.str || !item.str.trim()) return;
@@ -781,10 +853,46 @@
   }
 
   /**
-   * Run semantic comparison: line-based diff, then word-level highlighting only within changed lines.
-   * - Equal lines: no highlight.
-   * - Paired replace (remove line + add line): highlight only the differing words in those lines.
-   * - Standalone removed/added lines: highlight the whole line.
+   * Extract words from a page in PDF content-stream order (no position sorting).
+   * Two PDFs from the same source produce the same word order deterministically.
+   * Each word carries its rect for later highlight rendering.
+   */
+  function extractTextWords(page) {
+    return page.getTextContent().then(function (content) {
+      var items = content.items || [];
+      var words = [];
+      items.forEach(function (item) {
+        if (!item.str || !item.str.trim()) return;
+        var t = item.transform;
+        var itemX = t[4], itemY = t[5];
+        var itemH = item.height || 12;
+        var itemW = item.width || 0;
+        var totalChars = item.str.length;
+        var chunks = item.str.split(/(\s+)/);
+        var offsetX = 0;
+        chunks.forEach(function (chunk) {
+          var chunkW = (chunk.length / Math.max(totalChars, 1)) * itemW;
+          if (!chunk.trim()) { offsetX += chunkW; return; }
+          var normalized = normalizeWordForDiff(chunk);
+          if (normalized === '') { offsetX += chunkW; return; }
+          words.push({
+            word: normalized,
+            rect: { x: itemX + offsetX, y: itemY - itemH, w: chunkW, h: itemH }
+          });
+          offsetX += chunkW;
+        });
+      });
+      return words;
+    });
+  }
+
+  /**
+   * Pure text comparison — like diffchecker text-only mode.
+   * 1. Extract words in content-stream order (no position sorting — deterministic).
+   * 2. Fast-path: if concatenated text matches, zero differences.
+   * 3. Myers word diff, with run-level boundary dedup so different word-item
+   *    splits across PDFs (e.g. "MOIC"+"4" vs "MOIC4") are not flagged.
+   * 4. Map diff results to rects for highlight rendering.
    */
   function runSemanticOnePage(pdf1PageNum, pdf2PageNum) {
     return Promise.all([pdfDoc1.getPage(pdf1PageNum), pdfDoc2.getPage(pdf2PageNum)])
@@ -792,64 +900,41 @@
         var vp1 = pages[0].getViewport({ scale: DPI_SCALE });
         var vp2 = pages[1].getViewport({ scale: DPI_SCALE });
         return Promise.all([
-          getTextLinesFromPage(pages[0]),
-          getTextLinesFromPage(pages[1]),
-          getWordRectsFlat(pages[0]),
-          getWordRectsFlat(pages[1])
+          extractTextWords(pages[0]),
+          extractTextWords(pages[1])
         ]).then(function (arr) {
-          var linesOld = arr[0], linesNew = arr[1], wordsOld = arr[2], wordsNew = arr[3];
-          var wordsPerLineOld = assignWordsToLines(linesOld, wordsOld);
-          var wordsPerLineNew = assignWordsToLines(linesNew, wordsNew);
-          var oldLineStrs = linesOld.map(function (l) { return normalizeLineForDiff(l.text); });
-          var newLineStrs = linesNew.map(function (l) { return normalizeLineForDiff(l.text); });
-          var ops = myersDiff(oldLineStrs, newLineStrs);
+          var wordsOld = arr[0];
+          var wordsNew = arr[1];
+
+          var oldStrs = wordsOld.map(function (w) { return w.word; });
+          var newStrs = wordsNew.map(function (w) { return w.word; });
 
           var removedRects = [], addedRects = [];
           var removedWordCount = 0, addedWordCount = 0;
-          var idx1 = 0, idx2 = 0;
-          var removeRun = [], addRun = [];
 
-          function flushReplaceRun() {
-            var n = Math.min(removeRun.length, addRun.length);
-            for (var i = 0; i < n; i++) {
-              var lineOld = linesOld[removeRun[i]], lineNew = linesNew[addRun[i]];
-              var wordsO = wordsPerLineOld[removeRun[i]] || [], wordsN = wordsPerLineNew[addRun[i]] || [];
-              var oldWords = wordsO.map(function (w) { return w.word; });
-              var newWords = wordsN.map(function (w) { return w.word; });
-              var wordOps = myersDiff(oldWords, newWords);
-              var i1 = 0, i2 = 0;
-              wordOps.forEach(function (op) {
-                if (op.type === 'equal') { i1++; i2++; }
-                else if (op.type === 'remove') { removedRects.push(wordsO[i1].rect); removedWordCount++; i1++; }
-                else if (op.type === 'add') { addedRects.push(wordsN[i2].rect); addedWordCount++; i2++; }
-              });
+          if (oldStrs.join('') !== newStrs.join('')) {
+            var wordOps = myersDiff(oldStrs, newStrs);
+            var i1 = 0, i2 = 0, opIdx = 0;
+
+            while (opIdx < wordOps.length) {
+              if (wordOps[opIdx].type === 'equal') {
+                i1++; i2++; opIdx++;
+                continue;
+              }
+              var runRem = [], runAdd = [];
+              while (opIdx < wordOps.length && wordOps[opIdx].type !== 'equal') {
+                if (wordOps[opIdx].type === 'remove') { runRem.push(i1++); }
+                else { runAdd.push(i2++); }
+                opIdx++;
+              }
+              var remText = runRem.map(function (i) { return wordsOld[i].word; }).join('');
+              var addText = runAdd.map(function (i) { return wordsNew[i].word; }).join('');
+              if (remText !== addText) {
+                runRem.forEach(function (i) { removedRects.push(wordsOld[i].rect); removedWordCount++; });
+                runAdd.forEach(function (i) { addedRects.push(wordsNew[i].rect); addedWordCount++; });
+              }
             }
-            for (var i = n; i < removeRun.length; i++) {
-              var line = linesOld[removeRun[i]];
-              removedRects = removedRects.concat(line.rects);
-              removedWordCount += (line.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
-            }
-            for (var i = n; i < addRun.length; i++) {
-              var line = linesNew[addRun[i]];
-              addedRects = addedRects.concat(line.rects);
-              addedWordCount += (line.normalized || '').split(/\s+/).filter(function (w) { return w.length > 0; }).length;
-            }
-            removeRun = [];
-            addRun = [];
           }
-
-          ops.forEach(function (op) {
-            if (op.type === 'equal') {
-              flushReplaceRun();
-              idx1++;
-              idx2++;
-            } else if (op.type === 'remove') {
-              removeRun.push(idx1++);
-            } else if (op.type === 'add') {
-              addRun.push(idx2++);
-            }
-          });
-          flushReplaceRun();
 
           return Promise.all([
             renderPageWithHighlights(pages[0], vp1, removedRects, 'rgba(220,53,69,0.4)'),
