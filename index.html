@@ -47,19 +47,6 @@
           <input type="file" id="file2" accept=".pdf,application/pdf" hidden>
         </section>
 
-        <section class="mode-section">
-          <p class="mode-label">Comparison Mode</p>
-          <div class="mode-tabs" role="tablist">
-            <button type="button" class="mode-tab active" id="modeOverlay" role="tab" aria-selected="true" data-mode="overlay">
-              <span class="mode-tab-icon" aria-hidden="true">▣</span> Content Overlay
-            </button>
-            <button type="button" class="mode-tab" id="modeSemantic" role="tab" aria-selected="false" data-mode="semantic">
-              <span class="mode-tab-icon" aria-hidden="true">☰</span> Semantic Text
-            </button>
-          </div>
-          <p class="mode-desc" id="modeDesc">Pixel-by-pixel overlay: black/white = match, red = differ.</p>
-        </section>
-
         <section class="controls-section">
           <div class="compare-wrapper">
             <button type="button" class="compare-btn" id="compareBtn" disabled>Compare PDFs</button>
@@ -86,8 +73,8 @@
             </label>
           </div>
           <div class="toolbar-center">
-            <button type="button" class="toolbar-mode active" id="resultModeSemantic" data-mode="semantic">Semantic Text</button>
-            <button type="button" class="toolbar-mode" id="resultModeOverlay" data-mode="overlay">Content Overlay</button>
+            <button type="button" class="toolbar-mode active" id="resultModeSemantic" data-mode="semantic" data-tooltip="Compare text changes between PDFs. Red = removed, Green = added.">Semantic Text</button>
+            <button type="button" class="toolbar-mode" id="resultModeOverlay" data-mode="overlay" data-tooltip="Pixel-by-pixel overlay: black/white = match, red = differ.">Content Overlay</button>
           </div>
           <div class="toolbar-right">
             <button type="button" class="toolbar-close" id="newCompareBtn" title="New comparison">&times;</button>
@@ -181,7 +168,7 @@
                 <span class="footer-page" id="semanticPageInfo">1 / 1</span>
                 <button type="button" class="foot-btn" id="semanticNextPage" disabled>&rsaquo;</button>
               </div>
-              <button type="button" class="sidebar-download" id="downloadReportBtn">Download report</button>
+              <button type="button" class="sidebar-download" id="downloadReportBtn">Download comparison</button>
             </div>
           </div>
         </div>

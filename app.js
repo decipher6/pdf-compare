@@ -26,9 +26,7 @@
   var fileInput2        = document.getElementById('file2');
   var filename1El       = document.getElementById('filename1');
   var filename2El       = document.getElementById('filename2');
-  var modeOverlay       = document.getElementById('modeOverlay');
-  var modeSemantic      = document.getElementById('modeSemantic');
-  var modeDesc          = document.getElementById('modeDesc');
+  
   var compareBtn        = document.getElementById('compareBtn');
   var loadingOverlay    = document.getElementById('loadingOverlay');
   var errorBanner       = document.getElementById('errorBanner');
@@ -81,7 +79,7 @@
   var file1Object = null;
   var file2Object = null;
   var totalPages = 0;
-  var comparisonMode = 'overlay'; // 'overlay' | 'semantic'
+  var comparisonMode = 'semantic'; // 'overlay' | 'semantic'
 
   // Overlay state
   var currentPageIndex = 0;
@@ -185,20 +183,6 @@
 
   setupUploadZone(zone1, fileInput1, 1);
   setupUploadZone(zone2, fileInput2, 2);
-
-  // ── Setup mode tabs ─────────────────────────────────────
-
-  function setSetupMode(mode) {
-    comparisonMode = mode;
-    modeOverlay.classList.toggle('active', mode === 'overlay');
-    modeSemantic.classList.toggle('active', mode === 'semantic');
-    modeDesc.textContent = mode === 'overlay'
-      ? 'Pixel-by-pixel overlay: black/white = match, red = differ.'
-      : 'Compare text changes between two PDFs. Red = removed, Green = added.';
-  }
-
-  modeOverlay.addEventListener('click', function () { setSetupMode('overlay'); });
-  modeSemantic.addEventListener('click', function () { setSetupMode('semantic'); });
 
   // ── Result mode tabs (switch within results view) ───────
 
@@ -1281,42 +1265,82 @@
     updateSemanticReport();
   }
 
-  // Download report
   downloadReportBtn.addEventListener('click', function () {
     if (!semanticResultsByPage.length) return;
-    var remWords = 0, addWords = 0;
-    semanticResultsByPage.forEach(function (p) {
-      if (p.removedWordCount != null && p.addedWordCount != null) {
-        remWords += p.removedWordCount;
-        addWords += p.addedWordCount;
-      } else {
-        if (p.removedLines) {
-          p.removedLines.forEach(function (line) {
-            remWords += countWords(line.text);
-          });
+    downloadReportBtn.disabled = true;
+    downloadReportBtn.textContent = 'Generating…';
+    setLoading(true);
+
+    setTimeout(function () {
+      try {
+        var jsPDF = window.jspdf.jsPDF;
+        var GAP = 8;
+        var LABEL_H = 18;
+        var MARGIN = 12;
+
+        var firstOld = semanticResultsByPage[0].canvasOld;
+        var firstNew = semanticResultsByPage[0].canvasNew;
+        var refW = Math.max(firstOld.width, firstNew.width);
+        var refH = Math.max(firstOld.height, firstNew.height);
+        var pageW = MARGIN + refW + GAP + refW + MARGIN;
+        var pageH = MARGIN + LABEL_H + refH + MARGIN;
+
+        var doc = new jsPDF({
+          orientation: pageW > pageH ? 'landscape' : 'portrait',
+          unit: 'px',
+          format: [pageW, pageH],
+          compress: true
+        });
+
+        for (var i = 0; i < semanticResultsByPage.length; i++) {
+          var pg = semanticResultsByPage[i];
+          var cOld = pg.canvasOld;
+          var cNew = pg.canvasNew;
+          var slotW = (pageW - MARGIN * 2 - GAP) / 2;
+          var slotH = pageH - MARGIN * 2 - LABEL_H;
+
+          if (i > 0) doc.addPage([pageW, pageH], pageW > pageH ? 'l' : 'p');
+
+          doc.setFillColor(255, 255, 255);
+          doc.rect(0, 0, pageW, pageH, 'F');
+
+          doc.setFontSize(9);
+          doc.setTextColor(120, 120, 120);
+          doc.text('Original (PDF 1)', MARGIN, MARGIN + 10);
+          doc.text('Modified (PDF 2)', MARGIN + slotW + GAP, MARGIN + 10);
+
+          var yOff = MARGIN + LABEL_H;
+
+          var scaleOld = Math.min(slotW / cOld.width, slotH / cOld.height, 1);
+          var oldW = cOld.width * scaleOld;
+          var oldH = cOld.height * scaleOld;
+          doc.addImage(cOld.toDataURL('image/jpeg', 0.92), 'JPEG', MARGIN, yOff, oldW, oldH, 'pg' + i + 'old', 'FAST');
+
+          var scaleNew = Math.min(slotW / cNew.width, slotH / cNew.height, 1);
+          var newW = cNew.width * scaleNew;
+          var newH = cNew.height * scaleNew;
+          doc.addImage(cNew.toDataURL('image/jpeg', 0.92), 'JPEG', MARGIN + slotW + GAP, yOff, newW, newH, 'pg' + i + 'new', 'FAST');
+
+          doc.setDrawColor(200, 200, 200);
+          doc.setLineWidth(0.5);
+          doc.line(MARGIN + slotW + GAP / 2, MARGIN, MARGIN + slotW + GAP / 2, pageH - MARGIN);
+
+          doc.setFontSize(7);
+          doc.setTextColor(160, 160, 160);
+          doc.text('Page ' + (i + 1) + ' / ' + semanticResultsByPage.length, pageW / 2, pageH - 4, { align: 'center' });
         }
-        if (p.addedLines) {
-          p.addedLines.forEach(function (line) {
-            addWords += countWords(line.text);
-          });
-        }
+
+        var name1 = file1Object ? file1Object.name.replace(/\.pdf$/i, '') : 'PDF1';
+        var name2 = file2Object ? file2Object.name.replace(/\.pdf$/i, '') : 'PDF2';
+        doc.save(name1 + '_vs_' + name2 + '_comparison.pdf');
+      } catch (e) {
+        showError(e && e.message || 'PDF generation failed.');
+      } finally {
+        setLoading(false);
+        downloadReportBtn.disabled = false;
+        downloadReportBtn.textContent = 'Download comparison';
       }
-    });
-    var lines = [
-      'PDF Comparison Report (Semantic Text)',
-      'Original: ' + (file1Object ? file1Object.name : 'PDF 1'),
-      'Modified: ' + (file2Object ? file2Object.name : 'PDF 2'),
-      '', 'Summary (across all pages):',
-      '  Words removed from Modified: ' + remWords,
-      '  Words added in Modified: ' + addWords,
-      '  Total word changes: ' + (remWords + addWords)
-    ];
-    var blob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'comparison_report.txt';
-    a.click();
-    URL.revokeObjectURL(a.href);
+    }, 50);
   });
 
   // ── Disclaimer Review (API) ─────────────────────────────

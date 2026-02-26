@@ -621,6 +621,40 @@ body.has-results .setup-view { display: none; }
 .toolbar-mode.active { background: var(--primary); color: #FFFFFF; border-color: var(--primary); }
 .toolbar-mode:hover:not(.active) { background: var(--border-light); color: var(--text); }
 
+.toolbar-mode {
+  position: relative;
+}
+.toolbar-mode[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.45rem 0.65rem;
+  font-size: 0.72rem;
+  font-weight: 400;
+  line-height: 1.35;
+  color: var(--text);
+  background: #1C1C1C;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  white-space: nowrap;
+  z-index: 50;
+  pointer-events: none;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.35);
+}
+.toolbar-mode[data-tooltip]:hover::before {
+  content: '';
+  position: absolute;
+  top: calc(100% + 1px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-bottom-color: var(--border);
+  z-index: 51;
+  pointer-events: none;
+}
+
 .toolbar-close {
   width: 28px; height: 28px;
   display: flex; align-items: center; justify-content: center;
