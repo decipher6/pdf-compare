@@ -62,6 +62,26 @@
         </div>
       </div>
 
+      <!-- Mode selection popup -->
+      <div class="mode-popup-backdrop" id="modePopup" hidden>
+        <div class="mode-popup">
+          <h3 class="mode-popup-title">Choose Comparison Mode</h3>
+          <div class="mode-popup-options">
+            <button type="button" class="mode-popup-option" id="popupModeSemantic" data-mode="semantic">
+              <span class="mode-popup-icon">&#9776;</span>
+              <span class="mode-popup-label">Semantic Text</span>
+              <span class="mode-popup-desc">Compare text changes between PDFs. Red&nbsp;=&nbsp;removed, Green&nbsp;=&nbsp;added.</span>
+            </button>
+            <button type="button" class="mode-popup-option" id="popupModeOverlay" data-mode="overlay">
+              <span class="mode-popup-icon">&#9635;</span>
+              <span class="mode-popup-label">Content Overlay</span>
+              <span class="mode-popup-desc">Pixel-by-pixel overlay: black/white&nbsp;=&nbsp;match, red&nbsp;=&nbsp;differ.</span>
+            </button>
+          </div>
+          <button type="button" class="mode-popup-cancel" id="popupModeCancel">Cancel</button>
+        </div>
+      </div>
+
       <!-- ===== RESULTS VIEW (fills viewport after comparison) ===== -->
       <section class="results-view" id="resultsSection" hidden>
 

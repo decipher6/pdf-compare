@@ -566,6 +566,103 @@ body.has-results .setup-view { display: none; }
   margin-bottom: 1rem;
 }
 
+/* ===== MODE SELECTION POPUP ===== */
+
+.mode-popup-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.mode-popup-backdrop[hidden] {
+  display: none !important;
+}
+
+.mode-popup {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.mode-popup-title {
+  margin: 0 0 1.15rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  text-align: center;
+  color: var(--text);
+}
+
+.mode-popup-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-bottom: 1rem;
+}
+
+.mode-popup-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  padding: 0.85rem 1rem;
+  background: var(--bg-page);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  text-align: left;
+  color: var(--text);
+}
+
+.mode-popup-option:hover {
+  border-color: var(--primary);
+  background: rgba(46, 139, 87, 0.08);
+}
+
+.mode-popup-icon {
+  font-size: 1.15rem;
+  line-height: 1;
+  margin-bottom: 0.1rem;
+}
+
+.mode-popup-label {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.mode-popup-desc {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.mode-popup-cancel {
+  display: block;
+  width: 100%;
+  padding: 0.55rem;
+  font-size: 0.85rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.mode-popup-cancel:hover {
+  background: var(--bg-page);
+  color: var(--text);
+}
+
 /* ===== RESULTS VIEW ===== */
 
 .results-view {
@@ -573,6 +670,10 @@ body.has-results .setup-view { display: none; }
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.results-view[hidden] {
+  display: none !important;
 }
 
 /* Only one mode visible at a time - the other is fully hidden and takes no space */

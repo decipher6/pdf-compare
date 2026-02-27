@@ -215,10 +215,24 @@
     hideResultsView();
   });
 
-  // ── Compare button ──────────────────────────────────────
+  // ── Mode popup ──────────────────────────────────────────
 
-  compareBtn.addEventListener('click', function () {
-    if (!pdfDoc1 || !pdfDoc2) return;
+  var modePopup = document.getElementById('modePopup');
+  var popupModeSemantic = document.getElementById('popupModeSemantic');
+  var popupModeOverlay = document.getElementById('popupModeOverlay');
+  var popupModeCancel = document.getElementById('popupModeCancel');
+
+  function openModePopup() { modePopup.hidden = false; }
+  function closeModePopup() { modePopup.hidden = true; }
+
+  popupModeCancel.addEventListener('click', closeModePopup);
+  modePopup.addEventListener('click', function (e) {
+    if (e.target === modePopup) closeModePopup();
+  });
+
+  function startComparison(mode) {
+    closeModePopup();
+    comparisonMode = mode;
     clearError();
 
     var numPages1 = pdfDoc1.numPages;
@@ -264,6 +278,16 @@
         showError(e && e.message || 'Page alignment failed.');
         setLoading(false);
       });
+  }
+
+  popupModeSemantic.addEventListener('click', function () { startComparison('semantic'); });
+  popupModeOverlay.addEventListener('click', function () { startComparison('overlay'); });
+
+  // ── Compare button ──────────────────────────────────────
+
+  compareBtn.addEventListener('click', function () {
+    if (!pdfDoc1 || !pdfDoc2) return;
+    openModePopup();
   });
 
   // ===== OVERLAY COMPARISON ===============================
