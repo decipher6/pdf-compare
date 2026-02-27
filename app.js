@@ -609,7 +609,7 @@
         } else {
           if (cur.length) {
             var txt = joinWithImpliedSpaces(cur);
-            var rects = cur.map(function (i) { return { x: i.x, y: i.pdfBottom, w: i.w, h: i.h }; });
+            var rects = cur.map(function (i) { return { x: i.x, y: i.pdfY, w: i.w, h: i.h }; });
             var itemStrs = cur.map(function (i) { return i.str; });
             lines.push({ text: txt, normalized: normText(txt), rects: rects, itemStrs: itemStrs });
           }
@@ -618,7 +618,7 @@
       });
       if (cur.length) {
         var txt = joinWithImpliedSpaces(cur);
-        var rects = cur.map(function (i) { return { x: i.x, y: i.pdfBottom, w: i.w, h: i.h }; });
+        var rects = cur.map(function (i) { return { x: i.x, y: i.pdfY, w: i.w, h: i.h }; });
         var itemStrs = cur.map(function (i) { return i.str; });
         lines.push({ text: txt, normalized: normText(txt), rects: rects, itemStrs: itemStrs });
       }
@@ -784,6 +784,7 @@
     s = s.replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-');
     s = s.replace(/\u2026/g, '...');
     s = s.replace(/\u00D7/g, 'x');
+    s = s.replace(/\uF0A7/g, '\u00A7');
     s = s.replace(/[\u00D8\u00F8\u2022\u2023\u25E6\u2043\u204C\u204D\u2219\u00B7\u2981\u26AB\u25AA\u25AB\u25FE\u25FD\u25FC\u25FB\u25A0\u25A1\u2B25\u2B26\u25B8\u25B9\u25BA\u25BB\u25B6\u25B7\u27A2\u25C6\u25C7\u25CF\u25CB\u25D8\u2605\u2606\u2756\u29BE\u29BF\u2713\u2714]/g, '');
     s = s.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000\u1680]/g, ' ');
     s = s.replace(/\s+/g, ' ').trim();
@@ -823,7 +824,7 @@
           if (normalized === '') { offsetX += chunkW; return; }
           words.push({
             word: normalized,
-            rect: { x: itemX + offsetX, y: itemY - itemH, w: chunkW, h: itemH }
+            rect: { x: itemX + offsetX, y: itemY, w: chunkW, h: itemH }
           });
           offsetX += chunkW;
         });
@@ -924,7 +925,7 @@
             if (normalized === '') { offsetX += chunkW; return; }
             words.push({
               word: normalized,
-              rect: { x: itemX + offsetX, y: itemY - itemH, w: chunkW, h: itemH }
+              rect: { x: itemX + offsetX, y: itemY, w: chunkW, h: itemH }
             });
             offsetX += chunkW;
           });
@@ -953,7 +954,7 @@
           extractTextWords(pages[0]),
           extractTextWords(pages[1])
         ]).then(function (arr) {
-          var MARGIN_PCT = 0.08;
+          var MARGIN_PCT = 0.02;
           function stripHeaderFooter(words, pageH) {
             var yMin = pageH * MARGIN_PCT;
             var yMax = pageH * (1 - MARGIN_PCT);
@@ -976,25 +977,18 @@
 
           var needsDiff = oldJoined !== newJoined;
 
-          if (needsDiff) {
-            var oldBag = {}, newBag = {}, bagKey;
-            for (var bi = 0; bi < oldStrs.length; bi++) { bagKey = oldStrs[bi]; oldBag[bagKey] = (oldBag[bagKey] || 0) + 1; }
-            for (var bj = 0; bj < newStrs.length; bj++) { bagKey = newStrs[bj]; newBag[bagKey] = (newBag[bagKey] || 0) + 1; }
-            var sameBag = true;
-            var allKeys = Object.keys(oldBag);
-            if (allKeys.length === Object.keys(newBag).length) {
-              for (var bk = 0; bk < allKeys.length; bk++) {
-                if (oldBag[allKeys[bk]] !== newBag[allKeys[bk]]) { sameBag = false; break; }
-              }
-            } else { sameBag = false; }
-            if (sameBag) needsDiff = false;
+          var oldBag = {}, newBag = {}, bagKey;
+          for (var bi = 0; bi < oldStrs.length; bi++) { bagKey = oldStrs[bi]; oldBag[bagKey] = (oldBag[bagKey] || 0) + 1; }
+          for (var bj = 0; bj < newStrs.length; bj++) { bagKey = newStrs[bj]; newBag[bagKey] = (newBag[bagKey] || 0) + 1; }
+          var sameBag = false;
+          var allKeys = Object.keys(oldBag);
+          if (allKeys.length === Object.keys(newBag).length) {
+            sameBag = true;
+            for (var bk = 0; bk < allKeys.length; bk++) {
+              if (oldBag[allKeys[bk]] !== newBag[allKeys[bk]]) { sameBag = false; break; }
+            }
           }
-
-          if (needsDiff && oldJoined.length === newJoined.length) {
-            var sortedOld = oldJoined.split('').sort().join('');
-            var sortedNew = newJoined.split('').sort().join('');
-            if (sortedOld === sortedNew) needsDiff = false;
-          }
+          if (sameBag) needsDiff = false;
 
           if (needsDiff) {
             var wordOps = myersDiff(oldStrs, newStrs);
