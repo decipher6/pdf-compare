@@ -3,16 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PDF Tools</title>
+  <title>Compare Marketing Materials</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <!-- Top bar: tool selection -->
+  <!-- Top bar -->
   <header class="site-topbar">
-    <a href="#" class="topbar-brand" id="topbarBrand">PDF Tools</a>
+    <a href="#" class="topbar-brand" id="topbarBrand">
+      <img src="logo.jpg" alt="Logo" class="brand-logo">
+      Compare Marketing Materials
+    </a>
     <nav class="topbar-nav">
       <a href="#" class="topbar-link active" id="toolComparePdf" data-tool="compare">Compare PDF</a>
-      <a href="#" class="topbar-link" id="toolDisclaimerReview" data-tool="disclaimer">Disclaimer Review</a>
+      <!-- <a href="#" class="topbar-link" id="toolDisclaimerReview" data-tool="disclaimer">Disclaimer Review</a> -->
     </nav>
   </header>
 
@@ -24,23 +27,27 @@
       <!-- ===== SETUP VIEW (visible before comparison) ===== -->
       <div class="setup-view" id="setupView">
         <header class="header">
-          <h1>PDF Comparison Tool</h1>
-          <p class="subtitle">Your files never leave your device</p>
+          <h1>Compare Marketing Materials</h1>
+          <p class="subtitle">Upload two PDFs to detect visual and text differences. <br>Everything runs in your browser.</p>
         </header>
 
         <section class="upload-section">
           <div class="upload-zones">
-            <div class="upload-zone" id="zone1" data-zone="1">
-              <p class="zone-label">PDF 1 (Original)</p>
-              <p class="zone-hint">Drag & drop or</p>
-              <button type="button" class="browse-btn">Click to browse</button>
-              <p class="filename" id="filename1" aria-live="polite"></p>
+            <div class="upload-col">
+              <p class="upload-col-label">Original</p>
+              <div class="upload-zone" id="zone1" data-zone="1">
+                <p class="zone-hint">Drag & drop or</p>
+                <button type="button" class="browse-btn">Click to browse</button>
+                <p class="filename" id="filename1" aria-live="polite"></p>
+              </div>
             </div>
-            <div class="upload-zone" id="zone2" data-zone="2">
-              <p class="zone-label">PDF 2 (Modified)</p>
-              <p class="zone-hint">Drag & drop or</p>
-              <button type="button" class="browse-btn">Click to browse</button>
-              <p class="filename" id="filename2" aria-live="polite"></p>
+            <div class="upload-col">
+              <p class="upload-col-label">Modified</p>
+              <div class="upload-zone" id="zone2" data-zone="2">
+                <p class="zone-hint">Drag & drop or</p>
+                <button type="button" class="browse-btn">Click to browse</button>
+                <p class="filename" id="filename2" aria-live="polite"></p>
+              </div>
             </div>
           </div>
           <input type="file" id="file1" accept=".pdf,application/pdf" hidden>
@@ -51,34 +58,16 @@
           <div class="compare-wrapper">
             <button type="button" class="compare-btn" id="compareBtn" disabled>Compare PDFs</button>
             <div class="loading-overlay" id="loadingOverlay" aria-hidden="true">
-              <div class="spinner"></div>
-              <p>Processing...</p>
+              <div class="progress-bar-wrap">
+                <div class="progress-bar-fill" id="progressBarFill"></div>
+              </div>
+              <p class="progress-text" id="progressText">Preparing…</p>
             </div>
           </div>
         </section>
 
         <div class="error-banner" id="errorBanner" role="alert" hidden>
           <span id="errorText"></span>
-        </div>
-      </div>
-
-      <!-- Mode selection popup -->
-      <div class="mode-popup-backdrop" id="modePopup" hidden>
-        <div class="mode-popup">
-          <h3 class="mode-popup-title">Choose Comparison Mode</h3>
-          <div class="mode-popup-options">
-            <button type="button" class="mode-popup-option" id="popupModeSemantic" data-mode="semantic">
-              <span class="mode-popup-icon">&#9776;</span>
-              <span class="mode-popup-label">Semantic Text</span>
-              <span class="mode-popup-desc">Compare text changes between PDFs. Red&nbsp;=&nbsp;removed, Green&nbsp;=&nbsp;added.</span>
-            </button>
-            <button type="button" class="mode-popup-option" id="popupModeOverlay" data-mode="overlay">
-              <span class="mode-popup-icon">&#9635;</span>
-              <span class="mode-popup-label">Content Overlay</span>
-              <span class="mode-popup-desc">Pixel-by-pixel overlay: black/white&nbsp;=&nbsp;match, red&nbsp;=&nbsp;differ.</span>
-            </button>
-          </div>
-          <button type="button" class="mode-popup-cancel" id="popupModeCancel">Cancel</button>
         </div>
       </div>
 
@@ -129,6 +118,11 @@
 
         <!-- Semantic Text results -->
         <div class="results-semantic" id="semanticResults" hidden>
+          <!-- Loading overlay for mode switch -->
+          <div class="semantic-loading" id="semanticLoading" hidden>
+            <div class="spinner"></div>
+            <p>Loading comparison…</p>
+          </div>
           <div class="semantic-layout">
             <!-- PDF 1 panel -->
             <div class="semantic-panel">
@@ -197,14 +191,14 @@
       </div>
       <!-- end tool-panel Compare PDF -->
 
-      <!-- ===== Tool: Disclaimer Review ===== -->
+      <!--
+      ===== Tool: Disclaimer Review (commented out) =====
       <div class="tool-panel" id="toolPanelDisclaimer" hidden>
         <div class="disclaimer-tool">
           <header class="disclaimer-header">
             <h2>Disclaimer Review</h2>
             <p class="disclaimer-subtitle">AI review of disclaimers against the compliance checklist.</p>
           </header>
-
           <section class="disclaimer-upload">
             <div class="upload-zone disclaimer-zone" id="disclaimerZone">
               <p class="zone-label">PDF document</p>
@@ -213,11 +207,9 @@
               <p class="filename" id="disclaimerFilename" aria-live="polite"></p>
             </div>
             <input type="file" id="disclaimerFileInput" accept=".pdf,application/pdf" hidden>
-
             <div class="disclaimer-actions">
               <button type="button" class="compare-btn" id="disclaimerAnalyzeBtn" disabled>Analyze PDF</button>
             </div>
-
             <div class="error-banner" id="disclaimerError" role="alert" hidden>
               <span id="disclaimerErrorText"></span>
             </div>
@@ -225,37 +217,36 @@
         </div>
       </div>
 
-    </main>
-  </div>
-
-  <!-- Disclaimer Review result modal -->
-  <div class="disclaimer-modal-backdrop" id="disclaimerModal" aria-hidden="true" hidden>
-    <button type="button" class="disclaimer-modal-close" id="disclaimerModalClose" aria-label="Close">&times;</button>
-    <div class="disclaimer-modal">
-      <div class="disclaimer-modal-content" id="disclaimerModalContent" hidden>
-        <div class="disclaimer-modal-buffering" id="disclaimerModalBuffering" hidden>
-          <div class="disclaimer-buffering-spinner"></div>
-          <p class="disclaimer-buffering-text">Analyzing…</p>
-        </div>
-        <div class="disclaimer-modal-status" id="disclaimerModalStatus">
-          <span class="disclaimer-modal-status-left" id="disclaimerModalStatusLeft">—</span>
-          <span class="disclaimer-modal-status-summary" id="disclaimerModalStatusSummary">—</span>
-        </div>
-        <div class="disclaimer-modal-body">
-          <div class="disclaimer-modal-pdf-wrap">
-            <iframe id="disclaimerModalPdf" class="disclaimer-modal-pdf" title="Annotated PDF"></iframe>
+      <div class="disclaimer-modal-backdrop" id="disclaimerModal" aria-hidden="true" hidden>
+        <button type="button" class="disclaimer-modal-close" id="disclaimerModalClose" aria-label="Close">&times;</button>
+        <div class="disclaimer-modal">
+          <div class="disclaimer-modal-content" id="disclaimerModalContent" hidden>
+            <div class="disclaimer-modal-buffering" id="disclaimerModalBuffering" hidden>
+              <div class="disclaimer-buffering-spinner"></div>
+              <p class="disclaimer-buffering-text">Analyzing…</p>
+            </div>
+            <div class="disclaimer-modal-status" id="disclaimerModalStatus">
+              <span class="disclaimer-modal-status-left" id="disclaimerModalStatusLeft">—</span>
+              <span class="disclaimer-modal-status-summary" id="disclaimerModalStatusSummary">—</span>
+            </div>
+            <div class="disclaimer-modal-body">
+              <div class="disclaimer-modal-pdf-wrap">
+                <iframe id="disclaimerModalPdf" class="disclaimer-modal-pdf" title="Annotated PDF"></iframe>
+              </div>
+              <aside class="disclaimer-modal-comments">
+                <h3 class="disclaimer-modal-comments-title" id="disclaimerModalCommentsTitle">COMMENTS (0)</h3>
+                <div class="disclaimer-modal-comments-list" id="disclaimerModalCommentsList"></div>
+              </aside>
+            </div>
           </div>
-          <aside class="disclaimer-modal-comments">
-            <h3 class="disclaimer-modal-comments-title" id="disclaimerModalCommentsTitle">COMMENTS (0)</h3>
-            <div class="disclaimer-modal-comments-list" id="disclaimerModalCommentsList"></div>
-          </aside>
+          <div class="disclaimer-modal-error" id="disclaimerModalError" hidden>
+            <p id="disclaimerModalErrorText"></p>
+          </div>
         </div>
       </div>
+      -->
 
-      <div class="disclaimer-modal-error" id="disclaimerModalError" hidden>
-        <p id="disclaimerModalErrorText"></p>
-      </div>
-    </div>
+    </main>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>

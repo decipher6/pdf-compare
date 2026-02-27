@@ -192,17 +192,26 @@
     resultModeSemantic.classList.toggle('active', mode === 'semantic');
     toolbarSyncLabel.style.display = mode === 'semantic' ? '' : 'none';
 
-    /* Always hide the other mode first so only one is ever visible */
     overlayResults.hidden = true;
     semanticResults.hidden = true;
+    hideSemanticLoading();
+
     if (mode === 'overlay') {
       overlayResults.hidden = false;
       if (!cachedOverlay) { runOverlayComparison(); }
       else { restoreOverlay(); }
     } else {
       semanticResults.hidden = false;
-      if (!cachedSemantic) { runSemanticComparison(); }
-      else { restoreSemantic(); }
+      if (!cachedSemantic) {
+        showSemanticLoading();
+        setTimeout(function () { runSemanticComparison(); }, 30);
+      } else {
+        showSemanticLoading();
+        setTimeout(function () {
+          restoreSemantic();
+          hideSemanticLoading();
+        }, 30);
+      }
     }
   }
 
@@ -215,24 +224,28 @@
     hideResultsView();
   });
 
-  // ── Mode popup ──────────────────────────────────────────
+  // ── Progress bar ────────────────────────────────────────
 
-  var modePopup = document.getElementById('modePopup');
-  var popupModeSemantic = document.getElementById('popupModeSemantic');
-  var popupModeOverlay = document.getElementById('popupModeOverlay');
-  var popupModeCancel = document.getElementById('popupModeCancel');
+  var progressBarFill = document.getElementById('progressBarFill');
+  var progressText = document.getElementById('progressText');
 
-  function openModePopup() { modePopup.hidden = false; }
-  function closeModePopup() { modePopup.hidden = true; }
+  function setProgress(pct, text) {
+    if (progressBarFill) progressBarFill.style.width = Math.min(100, Math.max(0, pct)) + '%';
+    if (progressText && text) progressText.textContent = text;
+  }
 
-  popupModeCancel.addEventListener('click', closeModePopup);
-  modePopup.addEventListener('click', function (e) {
-    if (e.target === modePopup) closeModePopup();
-  });
+  // ── Semantic loading overlay (mode switch buffer) ──────
 
-  function startComparison(mode) {
-    closeModePopup();
-    comparisonMode = mode;
+  var semanticLoadingEl = document.getElementById('semanticLoading');
+
+  function showSemanticLoading() { if (semanticLoadingEl) semanticLoadingEl.hidden = false; }
+  function hideSemanticLoading() { if (semanticLoadingEl) semanticLoadingEl.hidden = true; }
+
+  // ── Compare button ──────────────────────────────────────
+
+  compareBtn.addEventListener('click', function () {
+    if (!pdfDoc1 || !pdfDoc2) return;
+    comparisonMode = 'semantic';
     clearError();
 
     var numPages1 = pdfDoc1.numPages;
@@ -247,11 +260,13 @@
     showResultsView();
     overlayResults.hidden = true;
     semanticResults.hidden = true;
+    setProgress(0, 'Aligning pages…');
     setLoading(true);
 
     Promise.all([getDocFingerprints(pdfDoc1), getDocFingerprints(pdfDoc2)])
       .then(function (arr) {
         var fp1 = arr[0], fp2 = arr[1];
+        setProgress(10, 'Aligning pages…');
         pageAlignment = computePageAlignment(fp1, fp2);
         pageAlignment = expandWeakPairsToBlanks(fp1, fp2, pageAlignment);
         totalPages = pageAlignment.length;
@@ -260,34 +275,17 @@
           setLoading(false);
           return;
         }
-        if (comparisonMode === 'overlay') {
-          resultModeOverlay.classList.add('active');
-          resultModeSemantic.classList.remove('active');
-          toolbarSyncLabel.style.display = 'none';
-          overlayResults.hidden = false;
-          runOverlayComparison();
-        } else {
-          resultModeSemantic.classList.add('active');
-          resultModeOverlay.classList.remove('active');
-          toolbarSyncLabel.style.display = '';
-          semanticResults.hidden = false;
-          runSemanticComparison();
-        }
+        resultModeSemantic.classList.add('active');
+        resultModeOverlay.classList.remove('active');
+        toolbarSyncLabel.style.display = '';
+        semanticResults.hidden = false;
+        setProgress(15, 'Comparing pages…');
+        runSemanticComparison();
       })
       .catch(function (e) {
         showError(e && e.message || 'Page alignment failed.');
         setLoading(false);
       });
-  }
-
-  popupModeSemantic.addEventListener('click', function () { startComparison('semantic'); });
-  popupModeOverlay.addEventListener('click', function () { startComparison('overlay'); });
-
-  // ── Compare button ──────────────────────────────────────
-
-  compareBtn.addEventListener('click', function () {
-    if (!pdfDoc1 || !pdfDoc2) return;
-    openModePopup();
   });
 
   // ===== OVERLAY COMPARISON ===============================
@@ -1128,23 +1126,36 @@
     if (file1Object) semanticFilename1El.textContent = file1Object.name;
     if (file2Object) semanticFilename2El.textContent = file2Object.name;
     setLoading(true);
-    
+    showSemanticLoading();
+    setProgress(15, 'Comparing page 1 of ' + totalPages + '…');
+
+    var completed = 0;
+    function trackProgress(promise) {
+      return promise.then(function (result) {
+        completed++;
+        var pct = 15 + Math.round((completed / totalPages) * 75);
+        setProgress(pct, 'Comparing page ' + completed + ' of ' + totalPages + '…');
+        return result;
+      });
+    }
+
     var promises = [];
     for (var i = 0; i < totalPages; i++) {
-      promises.push(runSemanticOneSlot(i));
+      promises.push(trackProgress(runSemanticOneSlot(i)));
     }
-    
+
     Promise.all(promises)
       .then(function (allPages) {
+        setProgress(92, 'Rendering…');
         semanticResultsByPage = allPages;
-        // Stack all pages vertically into continuous canvases
         drawSemanticAllPages(allPages);
         updateSemanticReport();
         updateSemanticNav();
         cacheSemantic();
+        setProgress(100, 'Done');
       })
       .catch(function (e) { showError(e && e.message || 'Semantic comparison failed.'); })
-      .finally(function () { setLoading(false); });
+      .finally(function () { setLoading(false); hideSemanticLoading(); });
   }
 
   function drawSemanticAllPages(allPages) {
@@ -1571,8 +1582,7 @@
     return new Blob([arr], { type: mime || 'application/pdf' });
   }
 
-  // ── Init mode tab state ─────────────────────────────────
-  setSetupMode('overlay');
+  // ── Init ────────────────────────────────────────────────
 
   // ── Top bar: tool selection ─────────────────────────────
   var toolComparePdf = document.getElementById('toolComparePdf');
@@ -1581,8 +1591,8 @@
   var toolPanelDisclaimer = document.getElementById('toolPanelDisclaimer');
 
   function setActiveTool(tool) {
-    toolComparePdf.classList.toggle('active', tool === 'compare');
-    toolDisclaimerReview.classList.toggle('active', tool === 'disclaimer');
+    if (toolComparePdf) toolComparePdf.classList.toggle('active', tool === 'compare');
+    if (toolDisclaimerReview) toolDisclaimerReview.classList.toggle('active', tool === 'disclaimer');
     if (toolPanelCompare) toolPanelCompare.hidden = tool !== 'compare';
     if (toolPanelDisclaimer) toolPanelDisclaimer.hidden = tool !== 'disclaimer';
   }
