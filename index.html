@@ -50,8 +50,8 @@
               </div>
             </div>
           </div>
-          <input type="file" id="file1" accept=".pdf,application/pdf" hidden>
-          <input type="file" id="file2" accept=".pdf,application/pdf" hidden>
+          <input type="file" id="file1" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+          <input type="file" id="file2" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
         </section>
 
         <section class="controls-section">
@@ -126,9 +126,10 @@
           <div class="semantic-layout">
             <!-- PDF 1 panel -->
             <div class="semantic-panel">
-              <div class="semantic-panel-bar"><span class="panel-dot dot-close"></span><span class="panel-title">Original (PDF 1)</span></div>
+              <div class="semantic-panel-bar"><span class="panel-dot dot-close"></span><span class="panel-title" id="semanticPanelTitle1">Original (PDF 1)</span></div>
               <div class="semantic-canvas-wrap" id="semanticWrapper1">
                 <canvas id="semanticCanvas1"></canvas>
+                <div id="semanticHtml1" class="semantic-html-view" hidden></div>
               </div>
               <div class="semantic-panel-foot">
                 <span class="panel-zoom" id="semanticZoom1">100%</span>
@@ -141,9 +142,10 @@
             </div>
             <!-- PDF 2 panel -->
             <div class="semantic-panel">
-              <div class="semantic-panel-bar"><span class="panel-dot dot-close"></span><span class="panel-title">Modified (PDF 2)</span></div>
+              <div class="semantic-panel-bar"><span class="panel-dot dot-close"></span><span class="panel-title" id="semanticPanelTitle2">Modified (PDF 2)</span></div>
               <div class="semantic-canvas-wrap" id="semanticWrapper2">
                 <canvas id="semanticCanvas2"></canvas>
+                <div id="semanticHtml2" class="semantic-html-view" hidden></div>
               </div>
               <div class="semantic-panel-foot">
                 <span class="panel-zoom" id="semanticZoom2">100%</span>
@@ -156,7 +158,7 @@
             </div>
             <!-- Sidebar -->
             <div class="semantic-sidebar">
-              <h3 class="sidebar-heading">Compare PDF</h3>
+              <h3 class="sidebar-heading" id="sidebarHeading">Compare PDF</h3>
               <div class="sidebar-legend">
                 <span class="sidebar-legend-item"><span class="legend-chip legend-chip-old"></span> Removed (red)</span>
                 <span class="sidebar-legend-item"><span class="legend-chip legend-chip-new"></span> Added (green)</span>
@@ -196,6 +198,8 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

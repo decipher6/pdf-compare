@@ -591,6 +591,34 @@ body.has-results .setup-view { display: none; }
   height: auto;
 }
 
+.semantic-html-view {
+  display: block;
+  width: 100%;
+  min-height: 100%;
+  padding: 1rem 1.1rem;
+  margin: 0;
+  background: #fff;
+  color: #1a1a1a;
+  font-size: 0.95rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.semantic-html-view[hidden] {
+  display: none !important;
+}
+
+.semantic-html-view .docx-diff-removed {
+  background: rgba(220, 53, 69, 0.38);
+  border-radius: 2px;
+}
+
+.semantic-html-view .docx-diff-added {
+  background: rgba(40, 167, 69, 0.38);
+  border-radius: 2px;
+}
+
 .semantic-panel-foot {
   display: flex;
   align-items: center;

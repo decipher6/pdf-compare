@@ -72,10 +72,19 @@
   var scrollSyncCheckbox     = document.getElementById('scrollSync');
   var downloadReportBtn      = document.getElementById('downloadReportBtn');
 
+  var semanticHtml1          = document.getElementById('semanticHtml1');
+  var semanticHtml2          = document.getElementById('semanticHtml2');
+  var semanticPanelTitle1      = document.getElementById('semanticPanelTitle1');
+  var semanticPanelTitle2      = document.getElementById('semanticPanelTitle2');
+  var sidebarHeading           = document.getElementById('sidebarHeading');
+
   // ── State ───────────────────────────────────────────────
 
   var pdfDoc1 = null;
   var pdfDoc2 = null;
+  var docxBuffer1 = null;
+  var docxBuffer2 = null;
+  var isDocxComparison = false;
   var file1Object = null;
   var file2Object = null;
   var totalPages = 0;
@@ -112,6 +121,48 @@
     return f.name.toLowerCase().endsWith('.pdf') || f.type === 'application/pdf';
   }
 
+  function isDocxFile(f) {
+    if (!f || !f.name) return false;
+    return f.name.toLowerCase().endsWith('.docx') ||
+      f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  }
+
+  function loadFile(file, which) {
+    if (!file) return;
+    if (isPdfFile(file)) loadPdf(file, which);
+    else if (isDocxFile(file)) loadDocx(file, which);
+    else showError('Please upload a PDF or Word (.docx) file.');
+  }
+
+  function resetPdfSemanticLabels() {
+    if (semanticPanelTitle1) semanticPanelTitle1.textContent = 'Original (PDF 1)';
+    if (semanticPanelTitle2) semanticPanelTitle2.textContent = 'Modified (PDF 2)';
+    if (sidebarHeading) sidebarHeading.textContent = 'Compare PDF';
+  }
+
+  function applyDocxSemanticLabels() {
+    if (semanticPanelTitle1) semanticPanelTitle1.textContent = 'Original (Word)';
+    if (semanticPanelTitle2) semanticPanelTitle2.textContent = 'Modified (Word)';
+    if (sidebarHeading) sidebarHeading.textContent = 'Compare Word';
+  }
+
+  function showDocxSemanticPanels(show) {
+    if (!semanticHtml1 || !semanticHtml2 || !semanticCanvas1 || !semanticCanvas2) return;
+    if (show) {
+      semanticHtml1.hidden = false;
+      semanticHtml2.hidden = false;
+      semanticCanvas1.style.display = 'none';
+      semanticCanvas2.style.display = 'none';
+    } else {
+      semanticHtml1.hidden = true;
+      semanticHtml2.hidden = true;
+      semanticHtml1.innerHTML = '';
+      semanticHtml2.innerHTML = '';
+      semanticCanvas1.style.display = '';
+      semanticCanvas2.style.display = '';
+    }
+  }
+
   function readFileAsArrayBuffer(file) {
     return new Promise(function (resolve, reject) {
       var r = new FileReader();
@@ -133,12 +184,16 @@
     document.body.classList.remove('has-results');
     overlayResults.hidden = true;
     semanticResults.hidden = true;
+    showDocxSemanticPanels(false);
+    resetPdfSemanticLabels();
+    isDocxComparison = false;
   }
 
   // ── File loading ────────────────────────────────────────
 
   function loadPdf(file, which) {
     if (!isPdfFile(file)) { showError('Please select a PDF file (.pdf).'); return; }
+    if (which === 1) docxBuffer1 = null; else docxBuffer2 = null;
     clearError();
     hideResultsView();
     cachedOverlay = null;
@@ -160,7 +215,56 @@
       .finally(function () { setLoading(false); });
   }
 
-  function updateCompareButton() { compareBtn.disabled = !(pdfDoc1 && pdfDoc2); }
+  function loadDocx(file, which) {
+    if (!isDocxFile(file)) { showError('Please select a Word file (.docx).'); return; }
+    if (which === 1) { pdfDoc1 = null; } else { pdfDoc2 = null; }
+    clearError();
+    hideResultsView();
+    cachedOverlay = null;
+    cachedSemantic = null;
+    setLoading(true);
+    readFileAsArrayBuffer(file)
+      .then(function (data) {
+        return mammoth.convertToHtml({ arrayBuffer: data.slice(0) }).then(function () { return data; });
+      })
+      .then(function (data) {
+        if (which === 1) {
+          docxBuffer1 = data;
+          file1Object = file;
+          filename1El.textContent = file.name;
+          zone1.classList.add('has-file');
+        } else {
+          docxBuffer2 = data;
+          file2Object = file;
+          filename2El.textContent = file.name;
+          zone2.classList.add('has-file');
+        }
+        updateCompareButton();
+      })
+      .catch(function () {
+        showError('Failed to load Word document. The file may be corrupted.');
+        if (which === 1) {
+          docxBuffer1 = null;
+          file1Object = null;
+          filename1El.textContent = '';
+          zone1.classList.remove('has-file');
+        } else {
+          docxBuffer2 = null;
+          file2Object = null;
+          filename2El.textContent = '';
+          zone2.classList.remove('has-file');
+        }
+        updateCompareButton();
+      })
+      .finally(function () { setLoading(false); });
+  }
+
+  function updateCompareButton() {
+    var bothPdf = pdfDoc1 && pdfDoc2;
+    var bothDocx = docxBuffer1 && docxBuffer2;
+    compareBtn.disabled = !(bothPdf || bothDocx);
+    compareBtn.textContent = bothDocx ? 'Compare Word documents' : 'Compare PDFs';
+  }
 
   // ── Upload zones ────────────────────────────────────────
 
@@ -173,11 +277,11 @@
     zoneEl.addEventListener('drop', function (e) {
       e.preventDefault(); zoneEl.classList.remove('drag-over');
       var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-      if (f) loadPdf(f, which);
+      if (f) loadFile(f, which);
     });
     inputEl.addEventListener('change', function () {
       var f = inputEl.files && inputEl.files[0];
-      if (f) loadPdf(f, which);
+      if (f) loadFile(f, which);
     });
   }
 
@@ -187,6 +291,10 @@
   // ── Result mode tabs (switch within results view) ───────
 
   function activateResultMode(mode) {
+    if (mode === 'overlay' && isDocxComparison) {
+      showError('Content overlay is not available for Word (.docx) comparisons. Semantic text comparison is available.');
+      return;
+    }
     comparisonMode = mode;
     resultModeOverlay.classList.toggle('active', mode === 'overlay');
     resultModeSemantic.classList.toggle('active', mode === 'semantic');
@@ -244,7 +352,12 @@
   // ── Compare button ──────────────────────────────────────
 
   compareBtn.addEventListener('click', function () {
+    if (docxBuffer1 && docxBuffer2) {
+      runDocxCompareFlow();
+      return;
+    }
     if (!pdfDoc1 || !pdfDoc2) return;
+    isDocxComparison = false;
     comparisonMode = 'semantic';
     clearError();
 
@@ -545,6 +658,183 @@
       }
     }
     return ops;
+  }
+
+  // ===== DOCX SEMANTIC (Word only; PDF workflow unchanged) ===
+
+  function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function docxHtmlToPlainWords(html) {
+    var parser = new DOMParser();
+    var doc = parser.parseFromString(html || '', 'text/html');
+    var text = doc.body.textContent || '';
+    return docxPlainTextToWords(text);
+  }
+
+  function docxPlainTextToWords(text) {
+    var normalized = normText(text);
+    if (!normalized) return [];
+    return normalized.split(/\s+/).map(function (w) { return normalizeWordForDiff(w); }).filter(function (w) { return w.length > 0; });
+  }
+
+  function buildDocxHtmlGrouped(oldStrs, newStrs) {
+    var wordOps = myersDiff(oldStrs, newStrs);
+    var leftParts = [];
+    var rightParts = [];
+    var opIdx = 0;
+    var i1 = 0;
+    var i2 = 0;
+    var remWords = 0;
+    var addWords = 0;
+    while (opIdx < wordOps.length) {
+      if (wordOps[opIdx].type === 'equal') {
+        var eq = escapeHtml(wordOps[opIdx].value);
+        leftParts.push(eq);
+        rightParts.push(eq);
+        opIdx++;
+        i1++;
+        i2++;
+        continue;
+      }
+      var runRem = [];
+      var runAdd = [];
+      while (opIdx < wordOps.length && wordOps[opIdx].type !== 'equal') {
+        if (wordOps[opIdx].type === 'remove') { runRem.push(i1++); }
+        else { runAdd.push(i2++); }
+        opIdx++;
+      }
+      var remText = runRem.map(function (idx) { return oldStrs[idx]; }).join('');
+      var addText = runAdd.map(function (idx) { return newStrs[idx]; }).join('');
+      if (remText === addText) {
+        var mid = escapeHtml(remText);
+        leftParts.push(mid);
+        rightParts.push(mid);
+      } else {
+        remWords += runRem.length;
+        addWords += runAdd.length;
+        leftParts.push('<span class="docx-diff-removed">' + runRem.map(function (idx) { return escapeHtml(oldStrs[idx]); }).join(' ') + '</span>');
+        rightParts.push('<span class="docx-diff-added">' + runAdd.map(function (idx) { return escapeHtml(newStrs[idx]); }).join(' ') + '</span>');
+      }
+    }
+    return {
+      left: leftParts.join(' ').trim(),
+      right: rightParts.join(' ').trim(),
+      remWords: remWords,
+      addWords: addWords
+    };
+  }
+
+  function runDocxCompareFlow() {
+    isDocxComparison = true;
+    clearError();
+    cachedOverlay = null;
+    cachedSemantic = null;
+    comparisonMode = 'semantic';
+    showResultsView();
+    overlayResults.hidden = true;
+    semanticResults.hidden = false;
+    resultModeSemantic.classList.add('active');
+    resultModeOverlay.classList.remove('active');
+    toolbarSyncLabel.style.display = '';
+    setProgress(0, 'Reading Word documents…');
+    setLoading(true);
+    showSemanticLoading();
+    Promise.all([
+      mammoth.convertToHtml({ arrayBuffer: docxBuffer1.slice(0) }),
+      mammoth.convertToHtml({ arrayBuffer: docxBuffer2.slice(0) })
+    ])
+      .then(function (results) {
+        setProgress(35, 'Comparing text…');
+        var html1 = results[0].value;
+        var html2 = results[1].value;
+        var wordsOld = docxHtmlToPlainWords(html1);
+        var wordsNew = docxHtmlToPlainWords(html2);
+        var oldStrs = wordsOld.map(function (w) { return w; });
+        var newStrs = wordsNew.map(function (w) { return w; });
+
+        var oldJoined = oldStrs.join('');
+        var newJoined = newStrs.join('');
+        var needsDiff = oldJoined !== newJoined;
+
+        var oldBag = {};
+        var newBag = {};
+        var bagKey;
+        var bi, bj, bk;
+        for (bi = 0; bi < oldStrs.length; bi++) {
+          bagKey = oldStrs[bi];
+          oldBag[bagKey] = (oldBag[bagKey] || 0) + 1;
+        }
+        for (bj = 0; bj < newStrs.length; bj++) {
+          bagKey = newStrs[bj];
+          newBag[bagKey] = (newBag[bagKey] || 0) + 1;
+        }
+        var sameBag = false;
+        var allKeys = Object.keys(oldBag);
+        if (allKeys.length === Object.keys(newBag).length) {
+          sameBag = true;
+          for (bk = 0; bk < allKeys.length; bk++) {
+            if (oldBag[allKeys[bk]] !== newBag[allKeys[bk]]) { sameBag = false; break; }
+          }
+        }
+        if (sameBag) needsDiff = false;
+
+        var leftHtml = '';
+        var rightHtml = '';
+        var remWords = 0;
+        var addWords = 0;
+
+        if (!needsDiff) {
+          var parser0 = new DOMParser();
+          var d1 = parser0.parseFromString(html1 || '', 'text/html');
+          var d2 = parser0.parseFromString(html2 || '', 'text/html');
+          var t1 = normText(d1.body.textContent || '');
+          var t2 = normText(d2.body.textContent || '');
+          leftHtml = escapeHtml(t1);
+          rightHtml = escapeHtml(t2);
+        } else {
+          var built = buildDocxHtmlGrouped(oldStrs, newStrs);
+          leftHtml = built.left;
+          rightHtml = built.right;
+          remWords = built.remWords;
+          addWords = built.addWords;
+        }
+
+        semanticHtml1.innerHTML = leftHtml;
+        semanticHtml2.innerHTML = rightHtml;
+        showDocxSemanticPanels(true);
+        applyDocxSemanticLabels();
+        if (file1Object) semanticFilename1El.textContent = file1Object.name;
+        if (file2Object) semanticFilename2El.textContent = file2Object.name;
+        totalPages = 1;
+        semanticResultsByPage = [{
+          removedWordCount: remWords,
+          addedWordCount: addWords
+        }];
+        updateSemanticReport();
+        updateSemanticNav();
+        semanticZoom1 = 1;
+        semanticZoom2 = 1;
+        applySemanticZoom();
+        cacheSemantic();
+        setProgress(100, 'Done');
+      })
+      .catch(function (e) {
+        showError(e && e.message || 'Word comparison failed.');
+        isDocxComparison = false;
+        showDocxSemanticPanels(false);
+        hideResultsView();
+      })
+      .finally(function () {
+        setLoading(false);
+        hideSemanticLoading();
+      });
   }
 
   // ===== SEMANTIC COMPARISON ==============================
@@ -1119,6 +1409,9 @@
   }
 
   function runSemanticComparison() {
+    isDocxComparison = false;
+    showDocxSemanticPanels(false);
+    resetPdfSemanticLabels();
     semanticResultsByPage = [];
     semanticCurrentPageIndex = 0;
     semanticZoom1 = 1;
@@ -1239,6 +1532,12 @@
   }
 
   function updateSemanticNav() {
+    if (isDocxComparison) {
+      semanticPageInfoEl.textContent = 'Word document';
+      semanticPrevPageBtn.disabled = true;
+      semanticNextPageBtn.disabled = true;
+      return;
+    }
     // Show total pages since we're displaying all pages continuously
     semanticPageInfoEl.textContent = totalPages + ' pages';
     semanticPrevPageBtn.disabled = true;  // No page nav needed for continuous scroll
@@ -1263,6 +1562,8 @@
   function applySemanticZoom() {
     semanticCanvas1.style.width = (semanticZoom1 * 100) + '%';
     semanticCanvas2.style.width = (semanticZoom2 * 100) + '%';
+    if (semanticHtml1) semanticHtml1.style.width = (semanticZoom1 * 100) + '%';
+    if (semanticHtml2) semanticHtml2.style.width = (semanticZoom2 * 100) + '%';
     semanticZoom1El.textContent = Math.round(semanticZoom1 * 100) + '%';
     semanticZoom2El.textContent = Math.round(semanticZoom2 * 100) + '%';
   }
@@ -1278,17 +1579,46 @@
   });
 
   function cacheSemantic() {
-    cachedSemantic = { semanticResultsByPage: semanticResultsByPage, totalPages: totalPages, semanticCurrentPageIndex: semanticCurrentPageIndex };
+    if (isDocxComparison) {
+      cachedSemantic = {
+        isDocx: true,
+        docxHtmlLeft: semanticHtml1 ? semanticHtml1.innerHTML : '',
+        docxHtmlRight: semanticHtml2 ? semanticHtml2.innerHTML : '',
+        docxRemovedCount: semanticResultsByPage[0] ? semanticResultsByPage[0].removedWordCount : 0,
+        docxAddedCount: semanticResultsByPage[0] ? semanticResultsByPage[0].addedWordCount : 0,
+        totalPages: 1,
+        semanticCurrentPageIndex: 0
+      };
+    } else {
+      cachedSemantic = { semanticResultsByPage: semanticResultsByPage, totalPages: totalPages, semanticCurrentPageIndex: semanticCurrentPageIndex };
+    }
   }
 
   function restoreSemantic() {
-    semanticResultsByPage = cachedSemantic.semanticResultsByPage;
+    if (!cachedSemantic) return;
     totalPages = cachedSemantic.totalPages;
     semanticCurrentPageIndex = cachedSemantic.semanticCurrentPageIndex;
     if (file1Object) semanticFilename1El.textContent = file1Object.name;
     if (file2Object) semanticFilename2El.textContent = file2Object.name;
-    if (semanticResultsByPage && semanticResultsByPage.length) {
-      drawSemanticAllPages(semanticResultsByPage);
+    if (cachedSemantic.isDocx) {
+      isDocxComparison = true;
+      semanticResultsByPage = [{
+        removedWordCount: cachedSemantic.docxRemovedCount || 0,
+        addedWordCount: cachedSemantic.docxAddedCount || 0
+      }];
+      if (semanticHtml1) semanticHtml1.innerHTML = cachedSemantic.docxHtmlLeft || '';
+      if (semanticHtml2) semanticHtml2.innerHTML = cachedSemantic.docxHtmlRight || '';
+      showDocxSemanticPanels(true);
+      applyDocxSemanticLabels();
+      applySemanticZoom();
+    } else {
+      isDocxComparison = false;
+      showDocxSemanticPanels(false);
+      resetPdfSemanticLabels();
+      semanticResultsByPage = cachedSemantic.semanticResultsByPage;
+      if (semanticResultsByPage && semanticResultsByPage.length) {
+        drawSemanticAllPages(semanticResultsByPage);
+      }
     }
     updateSemanticNav();
     updateSemanticReport();
@@ -1299,6 +1629,66 @@
     downloadReportBtn.disabled = true;
     downloadReportBtn.textContent = 'Generating…';
     setLoading(true);
+
+    if (isDocxComparison && semanticHtml1 && semanticHtml2 && typeof html2canvas !== 'undefined') {
+      Promise.all([
+        html2canvas(semanticHtml1, { scale: 1, backgroundColor: '#ffffff', logging: false }),
+        html2canvas(semanticHtml2, { scale: 1, backgroundColor: '#ffffff', logging: false })
+      ])
+        .then(function (canvases) {
+          var jsPDF = window.jspdf.jsPDF;
+          var GAP = 8;
+          var LABEL_H = 18;
+          var MARGIN = 12;
+          var firstOld = canvases[0];
+          var firstNew = canvases[1];
+          var refW = Math.max(firstOld.width, firstNew.width);
+          var refH = Math.max(firstOld.height, firstNew.height);
+          var pageW = MARGIN + refW + GAP + refW + MARGIN;
+          var pageH = MARGIN + LABEL_H + refH + MARGIN;
+          var doc = new jsPDF({
+            orientation: pageW > pageH ? 'landscape' : 'portrait',
+            unit: 'px',
+            format: [pageW, pageH],
+            compress: true
+          });
+          var slotW = (pageW - MARGIN * 2 - GAP) / 2;
+          var slotH = pageH - MARGIN * 2 - LABEL_H;
+          doc.setFillColor(255, 255, 255);
+          doc.rect(0, 0, pageW, pageH, 'F');
+          doc.setFontSize(9);
+          doc.setTextColor(120, 120, 120);
+          doc.text('Original (Word)', MARGIN, MARGIN + 10);
+          doc.text('Modified (Word)', MARGIN + slotW + GAP, MARGIN + 10);
+          var yOff = MARGIN + LABEL_H;
+          var scaleOld = Math.min(slotW / firstOld.width, slotH / firstOld.height, 1);
+          var oldW = firstOld.width * scaleOld;
+          var oldH = firstOld.height * scaleOld;
+          doc.addImage(firstOld.toDataURL('image/jpeg', 0.92), 'JPEG', MARGIN, yOff, oldW, oldH, 'wold', 'FAST');
+          var scaleNew = Math.min(slotW / firstNew.width, slotH / firstNew.height, 1);
+          var newW = firstNew.width * scaleNew;
+          var newH = firstNew.height * scaleNew;
+          doc.addImage(firstNew.toDataURL('image/jpeg', 0.92), 'JPEG', MARGIN + slotW + GAP, yOff, newW, newH, 'wnew', 'FAST');
+          doc.setDrawColor(200, 200, 200);
+          doc.setLineWidth(0.5);
+          doc.line(MARGIN + slotW + GAP / 2, MARGIN, MARGIN + slotW + GAP / 2, pageH - MARGIN);
+          doc.setFontSize(7);
+          doc.setTextColor(160, 160, 160);
+          doc.text('Word comparison', pageW / 2, pageH - 4, { align: 'center' });
+          var name1 = file1Object ? file1Object.name.replace(/\.(pdf|docx)$/i, '') : 'Doc1';
+          var name2 = file2Object ? file2Object.name.replace(/\.(pdf|docx)$/i, '') : 'Doc2';
+          doc.save(name1 + '_vs_' + name2 + '_comparison.pdf');
+        })
+        .catch(function (e) {
+          showError(e && e.message || 'Could not generate PDF from Word comparison.');
+        })
+        .finally(function () {
+          setLoading(false);
+          downloadReportBtn.disabled = false;
+          downloadReportBtn.textContent = 'Download comparison';
+        });
+      return;
+    }
 
     setTimeout(function () {
       try {
