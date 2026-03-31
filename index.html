@@ -28,7 +28,7 @@
       <div class="setup-view" id="setupView">
         <header class="header">
           <h1>Compare Marketing Materials</h1>
-          <p class="subtitle">Upload two PDFs to detect visual and text differences. <br>Everything runs in your browser.</p>
+          <p class="subtitle">Upload two documents to detect visual and text differences. <br>Everything runs in your browser.</p>
         </header>
 
         <section class="upload-section">
@@ -56,7 +56,7 @@
 
         <section class="controls-section">
           <div class="compare-wrapper">
-            <button type="button" class="compare-btn" id="compareBtn" disabled>Compare PDFs</button>
+            <button type="button" class="compare-btn" id="compareBtn" disabled>Compare Documents</button>
             <div class="loading-overlay" id="loadingOverlay" aria-hidden="true">
               <div class="progress-bar-wrap">
                 <div class="progress-bar-fill" id="progressBarFill"></div>
@@ -126,7 +126,7 @@
           <div class="semantic-layout">
             <!-- PDF 1 panel -->
             <div class="semantic-panel">
-              <div class="semantic-panel-bar"><span class="panel-dot dot-close"></span><span class="panel-title" id="semanticPanelTitle1">Original (PDF 1)</span></div>
+              <div class="semantic-panel-bar"><span class="panel-dot dot-close"></span><span class="panel-title" id="semanticPanelTitle1">Original</span></div>
               <div class="semantic-canvas-wrap" id="semanticWrapper1">
                 <canvas id="semanticCanvas1"></canvas>
                 <div id="semanticHtml1" class="semantic-html-view" hidden></div>
@@ -142,7 +142,7 @@
             </div>
             <!-- PDF 2 panel -->
             <div class="semantic-panel">
-              <div class="semantic-panel-bar"><span class="panel-dot dot-close"></span><span class="panel-title" id="semanticPanelTitle2">Modified (PDF 2)</span></div>
+              <div class="semantic-panel-bar"><span class="panel-dot dot-close"></span><span class="panel-title" id="semanticPanelTitle2">Modified</span></div>
               <div class="semantic-canvas-wrap" id="semanticWrapper2">
                 <canvas id="semanticCanvas2"></canvas>
                 <div id="semanticHtml2" class="semantic-html-view" hidden></div>
@@ -158,7 +158,7 @@
             </div>
             <!-- Sidebar -->
             <div class="semantic-sidebar">
-              <h3 class="sidebar-heading" id="sidebarHeading">Compare PDF</h3>
+              <h3 class="sidebar-heading" id="sidebarHeading">Compare Documents</h3>
               <div class="sidebar-legend">
                 <span class="sidebar-legend-item"><span class="legend-chip legend-chip-old"></span> Removed (red)</span>
                 <span class="sidebar-legend-item"><span class="legend-chip legend-chip-new"></span> Added (green)</span>
