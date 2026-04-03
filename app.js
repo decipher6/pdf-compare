@@ -16,6 +16,9 @@
   var DPI_SCALE = 1.5;
   var WHITE_THRESHOLD = 250;
 
+  /** Limit concurrent PDF.js page tasks (render + text) to avoid OOM on large decks. */
+  var PDF_PAGE_TASK_BATCH = 4;
+
   // ── DOM refs ────────────────────────────────────────────
 
   // Setup view
@@ -77,6 +80,10 @@
   var semanticPanelTitle1      = document.getElementById('semanticPanelTitle1');
   var semanticPanelTitle2      = document.getElementById('semanticPanelTitle2');
   var sidebarHeading           = document.getElementById('sidebarHeading');
+
+  /** Stacked full-res page canvases (avoids one giant scaled composite). */
+  var semanticStack1 = null;
+  var semanticStack2 = null;
 
   // ── State ───────────────────────────────────────────────
 
@@ -153,13 +160,17 @@
       semanticHtml2.hidden = false;
       semanticCanvas1.style.display = 'none';
       semanticCanvas2.style.display = 'none';
+      if (semanticStack1) semanticStack1.hidden = true;
+      if (semanticStack2) semanticStack2.hidden = true;
     } else {
       semanticHtml1.hidden = true;
       semanticHtml2.hidden = true;
       semanticHtml1.innerHTML = '';
       semanticHtml2.innerHTML = '';
-      semanticCanvas1.style.display = '';
-      semanticCanvas2.style.display = '';
+      semanticCanvas1.style.display = 'none';
+      semanticCanvas2.style.display = 'none';
+      if (semanticStack1) semanticStack1.hidden = true;
+      if (semanticStack2) semanticStack2.hidden = true;
     }
   }
 
@@ -170,6 +181,59 @@
       r.onerror = function () { reject(new Error('Failed to read file')); };
       r.readAsArrayBuffer(file);
     });
+  }
+
+  /**
+   * Run promise factories in batches so at most `batchSize` run at once.
+   * Preserves result order (array index).
+   */
+  function promisePool(factories, batchSize) {
+    var n = factories.length;
+    var results = new Array(n);
+    var i = 0;
+    function runBatch() {
+      var batch = [];
+      for (var b = 0; b < batchSize && i < n; b++, i++) {
+        (function (idx) {
+          batch.push(
+            factories[idx]().then(function (r) {
+              results[idx] = r;
+            })
+          );
+        })(i);
+      }
+      if (!batch.length) return Promise.resolve(results);
+      return Promise.all(batch).then(runBatch);
+    }
+    return runBatch();
+  }
+
+  function ensureSemanticStacks() {
+    if (!semanticStack1 && semanticWrapper1 && semanticCanvas1) {
+      semanticStack1 = document.createElement('div');
+      semanticStack1.className = 'semantic-stack';
+      semanticStack1.hidden = true;
+      semanticWrapper1.insertBefore(semanticStack1, semanticCanvas1);
+    }
+    if (!semanticStack2 && semanticWrapper2 && semanticCanvas2) {
+      semanticStack2 = document.createElement('div');
+      semanticStack2.className = 'semantic-stack';
+      semanticStack2.hidden = true;
+      semanticWrapper2.insertBefore(semanticStack2, semanticCanvas2);
+    }
+  }
+
+  /** Match row heights to max of rendered canvas heights (scroll sync) without using raw canvas pixel height as CSS px. */
+  function syncSemanticRowHeights() {
+    if (!semanticStack1 || !semanticStack2 || semanticStack1.hidden) return;
+    var rows1 = semanticStack1.querySelectorAll('.semantic-page-row');
+    var rows2 = semanticStack2.querySelectorAll('.semantic-page-row');
+    var n = Math.min(rows1.length, rows2.length);
+    for (var i = 0; i < n; i++) {
+      var h = Math.max(rows1[i].offsetHeight, rows2[i].offsetHeight);
+      rows1[i].style.minHeight = h + 'px';
+      rows2[i].style.minHeight = h + 'px';
+    }
   }
 
   // ── Results visibility ──────────────────────────────────
@@ -925,11 +989,15 @@
 
   function getDocFingerprints(pdfDoc) {
     var n = pdfDoc.numPages;
-    var promises = [];
+    var factories = [];
     for (var i = 1; i <= n; i++) {
-      promises.push(pdfDoc.getPage(i).then(getPageFingerprint));
+      (function (pageNum) {
+        factories.push(function () {
+          return pdfDoc.getPage(pageNum).then(getPageFingerprint);
+        });
+      })(i);
     }
-    return Promise.all(promises);
+    return promisePool(factories, PDF_PAGE_TASK_BATCH);
   }
 
   /**
@@ -1432,12 +1500,16 @@
       });
     }
 
-    var promises = [];
-    for (var i = 0; i < totalPages; i++) {
-      promises.push(trackProgress(runSemanticOneSlot(i)));
+    var factories = [];
+    for (var si = 0; si < totalPages; si++) {
+      (function (slotIdx) {
+        factories.push(function () {
+          return trackProgress(runSemanticOneSlot(slotIdx));
+        });
+      })(si);
     }
 
-    Promise.all(promises)
+    promisePool(factories, PDF_PAGE_TASK_BATCH)
       .then(function (allPages) {
         setProgress(92, 'Rendering…');
         semanticResultsByPage = allPages;
@@ -1453,50 +1525,34 @@
 
   function drawSemanticAllPages(allPages) {
     if (!allPages || !allPages.length) return;
-    
-    // Calculate total height and max width
-    var maxWidth = 0;
-    var totalHeight = 0;
+
+    ensureSemanticStacks();
+    if (!semanticStack1 || !semanticStack2) return;
+
+    while (semanticStack1.firstChild) semanticStack1.removeChild(semanticStack1.firstChild);
+    while (semanticStack2.firstChild) semanticStack2.removeChild(semanticStack2.firstChild);
+
+    semanticCanvas1.style.display = 'none';
+    semanticCanvas2.style.display = 'none';
+    semanticStack1.hidden = false;
+    semanticStack2.hidden = false;
+
     allPages.forEach(function (p) {
-      maxWidth = Math.max(maxWidth, p.canvasOld.width, p.canvasNew.width);
-      totalHeight += Math.max(p.canvasOld.height, p.canvasNew.height);
+      var row1 = document.createElement('div');
+      row1.className = 'semantic-page-row';
+      row1.appendChild(p.canvasOld);
+      semanticStack1.appendChild(row1);
+
+      var row2 = document.createElement('div');
+      row2.className = 'semantic-page-row';
+      row2.appendChild(p.canvasNew);
+      semanticStack2.appendChild(row2);
     });
-    
-    // Create continuous canvases
-    var c1 = document.createElement('canvas');
-    c1.width = maxWidth;
-    c1.height = totalHeight;
-    var ctx1 = c1.getContext('2d');
-    ctx1.fillStyle = 'white';
-    ctx1.fillRect(0, 0, c1.width, c1.height);
-    
-    var c2 = document.createElement('canvas');
-    c2.width = maxWidth;
-    c2.height = totalHeight;
-    var ctx2 = c2.getContext('2d');
-    ctx2.fillStyle = 'white';
-    ctx2.fillRect(0, 0, c2.width, c2.height);
-    
-    // Stack pages vertically with consistent row height per slot so both panels match (scroll sync)
-    var y1 = 0, y2 = 0;
-    allPages.forEach(function (p) {
-      var rowHeight = Math.max(p.canvasOld.height, p.canvasNew.height);
-      ctx1.drawImage(p.canvasOld, 0, y1);
-      ctx2.drawImage(p.canvasNew, 0, y2);
-      y1 += rowHeight;
-      y2 += rowHeight;
-    });
-    
-    // Update display canvases
-    semanticCanvas1.width = c1.width;
-    semanticCanvas1.height = c1.height;
-    semanticCanvas1.getContext('2d').drawImage(c1, 0, 0);
-    
-    semanticCanvas2.width = c2.width;
-    semanticCanvas2.height = c2.height;
-    semanticCanvas2.getContext('2d').drawImage(c2, 0, 0);
-    
+
     applySemanticZoom();
+    requestAnimationFrame(function () {
+      syncSemanticRowHeights();
+    });
   }
 
   function countWords(text) {
@@ -1560,12 +1616,24 @@
 
   // Semantic per-panel zoom
   function applySemanticZoom() {
-    semanticCanvas1.style.width = (semanticZoom1 * 100) + '%';
-    semanticCanvas2.style.width = (semanticZoom2 * 100) + '%';
+    if (semanticStack1 && !semanticStack1.hidden) {
+      semanticStack1.style.width = (semanticZoom1 * 100) + '%';
+      semanticStack2.style.width = (semanticZoom2 * 100) + '%';
+      semanticCanvas1.style.width = '';
+      semanticCanvas2.style.width = '';
+    } else {
+      semanticCanvas1.style.width = (semanticZoom1 * 100) + '%';
+      semanticCanvas2.style.width = (semanticZoom2 * 100) + '%';
+    }
     if (semanticHtml1) semanticHtml1.style.width = (semanticZoom1 * 100) + '%';
     if (semanticHtml2) semanticHtml2.style.width = (semanticZoom2 * 100) + '%';
     semanticZoom1El.textContent = Math.round(semanticZoom1 * 100) + '%';
     semanticZoom2El.textContent = Math.round(semanticZoom2 * 100) + '%';
+    if (semanticStack1 && !semanticStack1.hidden) {
+      requestAnimationFrame(function () {
+        syncSemanticRowHeights();
+      });
+    }
   }
 
   document.addEventListener('click', function (e) {
