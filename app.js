@@ -19,6 +19,26 @@
   /** Limit concurrent PDF.js page tasks (render + text) to avoid OOM on large decks. */
   var PDF_PAGE_TASK_BATCH = 4;
 
+  /** Richer Word → HTML: keep empty paragraphs, map common styles (merged with mammoth defaults). */
+  var DOCX_MAMMOTH_OPTIONS = {
+    ignoreEmptyParagraphs: false,
+    includeDefaultStyleMap: true,
+    styleMap: [
+      "p[style-name='Heading 1'] => h1:fresh",
+      "p[style-name='Heading 2'] => h2:fresh",
+      "p[style-name='Heading 3'] => h3:fresh",
+      "p[style-name='Heading 4'] => h4:fresh",
+      "p[style-name='Heading 5'] => h5:fresh",
+      "p[style-name='Heading 6'] => h6:fresh",
+      "p[style-name='Title'] => h1.title:fresh",
+      "p[style-name='Subtitle'] => h2.subtitle:fresh",
+      "p[style-name='Quote'] => blockquote:fresh",
+      "p[style-name='Intense Quote'] => blockquote.intense:fresh",
+      "p[style-name='Caption'] => p.docx-caption:fresh",
+      "p[style-name='List Paragraph'] => p.list-paragraph:fresh"
+    ]
+  };
+
   // ── DOM refs ────────────────────────────────────────────
 
   // Setup view
@@ -289,7 +309,7 @@
     setLoading(true);
     readFileAsArrayBuffer(file)
       .then(function (data) {
-        return mammoth.convertToHtml({ arrayBuffer: data.slice(0) }).then(function () { return data; });
+        return mammoth.convertToHtml(Object.assign({ arrayBuffer: data.slice(0) }, DOCX_MAMMOTH_OPTIONS)).then(function () { return data; });
       })
       .then(function (data) {
         if (which === 1) {
@@ -735,6 +755,22 @@
       .replace(/"/g, '&quot;');
   }
 
+  function enhanceDocxHtml(html) {
+    if (!html) return '';
+    return String(html).replace(/<hr\s*\/?>/gi, '<hr class="docx-page-break" />');
+  }
+
+  /** Plain text for diffing, preserves line breaks from <br> (uses innerText). */
+  function htmlFragmentToPlainWithBreaks(html) {
+    if (!html) return '';
+    var doc = new DOMParser().parseFromString('<body><div class="docx-plain-wrap"></div></body>', 'text/html');
+    var el = doc.body.querySelector('.docx-plain-wrap');
+    if (!el) return '';
+    el.innerHTML = html;
+    var t = el.innerText != null ? el.innerText : el.textContent;
+    return t || '';
+  }
+
   function docxHtmlToPlainWords(html) {
     var parser = new DOMParser();
     var doc = parser.parseFromString(html || '', 'text/html');
@@ -748,6 +784,34 @@
     return normalized.split(/\s+/).map(function (w) { return normalizeWordForDiff(w); }).filter(function (w) { return w.length > 0; });
   }
 
+  /** Word tokens with \n between soft line breaks inside a block. */
+  function docxPlainTextToWordsWithBreaks(text) {
+    if (!text) return [];
+    var lines = String(text).split(/\r?\n/);
+    var tokens = [];
+    for (var i = 0; i < lines.length; i++) {
+      if (i > 0) tokens.push('\n');
+      var lineWords = docxPlainTextToWords(lines[i]);
+      for (var j = 0; j < lineWords.length; j++) tokens.push(lineWords[j]);
+    }
+    return tokens;
+  }
+
+  function joinDocxWordParts(parts) {
+    return parts
+      .join(' ')
+      .replace(/>\s+</g, '><')
+      .replace(/\s+<br\s*\/?>/gi, '<br>')
+      .replace(/<br\s*\/?>\s+/gi, '<br>')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
+  function escapeDocxWordToken(w) {
+    if (w === '\n') return '<br>';
+    return escapeHtml(w);
+  }
+
   function buildDocxHtmlGrouped(oldStrs, newStrs) {
     var wordOps = myersDiff(oldStrs, newStrs);
     var leftParts = [];
@@ -759,7 +823,8 @@
     var addWords = 0;
     while (opIdx < wordOps.length) {
       if (wordOps[opIdx].type === 'equal') {
-        var eq = escapeHtml(wordOps[opIdx].value);
+        var ev = wordOps[opIdx].value;
+        var eq = escapeDocxWordToken(ev);
         leftParts.push(eq);
         rightParts.push(eq);
         opIdx++;
@@ -783,13 +848,110 @@
       } else {
         remWords += runRem.length;
         addWords += runAdd.length;
-        leftParts.push('<span class="docx-diff-removed">' + runRem.map(function (idx) { return escapeHtml(oldStrs[idx]); }).join(' ') + '</span>');
-        rightParts.push('<span class="docx-diff-added">' + runAdd.map(function (idx) { return escapeHtml(newStrs[idx]); }).join(' ') + '</span>');
+        leftParts.push(
+          '<span class="docx-diff-removed">' +
+            joinDocxWordParts(runRem.map(function (idx) { return escapeDocxWordToken(oldStrs[idx]); })) +
+          '</span>'
+        );
+        rightParts.push(
+          '<span class="docx-diff-added">' +
+            joinDocxWordParts(runAdd.map(function (idx) { return escapeDocxWordToken(newStrs[idx]); })) +
+          '</span>'
+        );
       }
     }
     return {
-      left: leftParts.join(' ').trim(),
-      right: rightParts.join(' ').trim(),
+      left: joinDocxWordParts(leftParts),
+      right: joinDocxWordParts(rightParts),
+      remWords: remWords,
+      addWords: addWords
+    };
+  }
+
+  function extractDocxBlocks(html) {
+    var parser = new DOMParser();
+    var doc = parser.parseFromString(html || '', 'text/html');
+    var blocks = [];
+    function pushBlock(el) {
+      if (!el) return;
+      var tag = el.tagName.toLowerCase();
+      if (tag === 'ul' || tag === 'ol') {
+        for (var ci = 0; ci < el.children.length; ci++) {
+          var li = el.children[ci];
+          if (li.tagName.toLowerCase() === 'li') {
+            blocks.push({ html: li.outerHTML, text: normText(li.textContent) });
+          }
+        }
+        return;
+      }
+      blocks.push({ html: el.outerHTML, text: normText(el.textContent) });
+    }
+    var ch = doc.body.children;
+    for (var j = 0; j < ch.length; j++) {
+      pushBlock(ch[j]);
+    }
+    return blocks;
+  }
+
+  function buildDocxBlockDiff(blocks1, blocks2) {
+    var w1 = blocks1.map(function (b) { return b.text; });
+    var w2 = blocks2.map(function (b) { return b.text; });
+    var wordOps = myersDiff(w1, w2);
+    var leftParts = [];
+    var rightParts = [];
+    var opIdx = 0;
+    var i1 = 0;
+    var i2 = 0;
+    var remWords = 0;
+    var addWords = 0;
+    while (opIdx < wordOps.length) {
+      if (wordOps[opIdx].type === 'equal') {
+        leftParts.push(blocks1[i1].html);
+        rightParts.push(blocks2[i2].html);
+        opIdx++;
+        i1++;
+        i2++;
+        continue;
+      }
+      var runRem = [];
+      var runAdd = [];
+      while (opIdx < wordOps.length && wordOps[opIdx].type !== 'equal') {
+        if (wordOps[opIdx].type === 'remove') { runRem.push(i1++); }
+        else { runAdd.push(i2++); }
+        opIdx++;
+      }
+      if (runRem.length === 1 && runAdd.length === 1) {
+        var b1 = blocks1[runRem[0]];
+        var b2 = blocks2[runAdd[0]];
+        var built = buildDocxHtmlGrouped(
+          docxPlainTextToWordsWithBreaks(htmlFragmentToPlainWithBreaks(b1.html)),
+          docxPlainTextToWordsWithBreaks(htmlFragmentToPlainWithBreaks(b2.html))
+        );
+        leftParts.push('<div class="docx-diff-para">' + built.left + '</div>');
+        rightParts.push('<div class="docx-diff-para">' + built.right + '</div>');
+        remWords += built.remWords;
+        addWords += built.addWords;
+        continue;
+      }
+      var maxLen = Math.max(runRem.length, runAdd.length);
+      for (var k = 0; k < maxLen; k++) {
+        if (k < runRem.length) {
+          leftParts.push('<div class="docx-diff-removed-block">' + blocks1[runRem[k]].html + '</div>');
+          remWords += countWords(blocks1[runRem[k]].text);
+        } else {
+          leftParts.push('<div class="docx-diff-para docx-diff-empty"></div>');
+        }
+        if (k < runAdd.length) {
+          rightParts.push('<div class="docx-diff-added-block">' + blocks2[runAdd[k]].html + '</div>');
+          addWords += countWords(blocks2[runAdd[k]].text);
+        } else {
+          rightParts.push('<div class="docx-diff-para docx-diff-empty"></div>');
+        }
+      }
+    }
+    return {
+      left: leftParts.join(''),
+      right: rightParts.join(''),
       remWords: remWords,
       addWords: addWords
     };
@@ -811,8 +973,8 @@
     setLoading(true);
     showSemanticLoading();
     Promise.all([
-      mammoth.convertToHtml({ arrayBuffer: docxBuffer1.slice(0) }),
-      mammoth.convertToHtml({ arrayBuffer: docxBuffer2.slice(0) })
+      mammoth.convertToHtml(Object.assign({ arrayBuffer: docxBuffer1.slice(0) }, DOCX_MAMMOTH_OPTIONS)),
+      mammoth.convertToHtml(Object.assign({ arrayBuffer: docxBuffer2.slice(0) }, DOCX_MAMMOTH_OPTIONS))
     ])
       .then(function (results) {
         setProgress(35, 'Comparing text…');
@@ -854,16 +1016,21 @@
         var remWords = 0;
         var addWords = 0;
 
+        var h1 = enhanceDocxHtml(html1);
+        var h2 = enhanceDocxHtml(html2);
+
         if (!needsDiff) {
-          var parser0 = new DOMParser();
-          var d1 = parser0.parseFromString(html1 || '', 'text/html');
-          var d2 = parser0.parseFromString(html2 || '', 'text/html');
-          var t1 = normText(d1.body.textContent || '');
-          var t2 = normText(d2.body.textContent || '');
-          leftHtml = escapeHtml(t1);
-          rightHtml = escapeHtml(t2);
+          leftHtml = h1;
+          rightHtml = h2;
         } else {
-          var built = buildDocxHtmlGrouped(oldStrs, newStrs);
+          var blocks1 = extractDocxBlocks(h1);
+          var blocks2 = extractDocxBlocks(h2);
+          var built;
+          if (blocks1.length === 0 && blocks2.length === 0) {
+            built = buildDocxHtmlGrouped(oldStrs, newStrs);
+          } else {
+            built = buildDocxBlockDiff(blocks1, blocks2);
+          }
           leftHtml = built.left;
           rightHtml = built.right;
           remWords = built.remWords;
