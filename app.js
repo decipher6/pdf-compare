@@ -1293,23 +1293,30 @@
 
   /**
    * Normalize text for comparison so "same" words are not flagged different (text-based diff).
-   * - Unicode NFKC; ligatures → plain (ﬁ→fi, ﬂ→fl, etc.); fancy quotes/dashes → plain
-   * - Zero-width / joiners / BOM removed; ellipsis, non-breaking hyphen; whitespace normalized
+   * - Unicode NFKC (compatibility forms, many ligatures, fullwidth ASCII, etc.)
+   * - Strip invisible / bidi / isolate controls and variation selectors (not removed by NFKC)
+   * - Latin ligature code points (backup if NFKC is incomplete); fancy quotes/dashes → ASCII
+   * - All Unicode white space → regular space; collapse runs
+   * Intentionally does not merge words across PDF text runs (e.g. hyphenated line breaks),
+   * so real hyphenation or wording changes are not hidden.
    */
   function normalizeWordForDiff(str) {
     if (typeof str !== 'string') return '';
     var s = str.normalize('NFKC');
-    s = s.replace(/[\u200B-\u200D\uFEFF\u2060\u00AD\u034F\u061C\u180E\uFFF9-\uFFFB]/g, '');
+    // ZW*, BOM, soft hyphen, CGJ, ALM, Mongolian vowel sep, interlinear anchors,
+    // LRM/RLM, bidi embedding (PDFs often inject these), isolates, variation selectors.
+    // Omits U+2062–U+2064 (invisible math operators) to avoid merging distinct symbols.
+    s = s.replace(/[\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFE00-\uFE0F\uFEFF\u00AD\u034F\u061C\u180E\uFFF9-\uFFFB]/g, '');
     s = s.replace(/\uFB01/g, 'fi').replace(/\uFB02/g, 'fl').replace(/\uFB00/g, 'ff')
       .replace(/\uFB03/g, 'ffi').replace(/\uFB04/g, 'ffl');
-    s = s.replace(/[\u2018\u2019\u02BC\u0060\u00B4\u2032\u275B\u275C]/g, "'")
+    s = s.replace(/[\u2018\u2019\u02BB\u02BC\u0060\u00B4\u2032\u275B\u275C]/g, "'")
       .replace(/[\u201C\u201D\u00AB\u00BB\u2033\u275D\u275E\u301D\u301E]/g, '"');
-    s = s.replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-');
+    s = s.replace(/[\u2010-\u2015\u2212\u2E17\u2E1A\uFE58\uFE63\uFF0D]/g, '-');
     s = s.replace(/\u2026/g, '...');
     s = s.replace(/\u00D7/g, 'x');
     s = s.replace(/\uF0A7/g, '\u00A7');
     s = s.replace(/[\u00D8\u00F8\u2022\u2023\u25E6\u2043\u204C\u204D\u2219\u00B7\u2981\u26AB\u25AA\u25AB\u25FE\u25FD\u25FC\u25FB\u25A0\u25A1\u2B25\u2B26\u25B8\u25B9\u25BA\u25BB\u25B6\u25B7\u27A2\u25C6\u25C7\u25CF\u25CB\u25D8\u2605\u2606\u2756\u29BE\u29BF\u2713\u2714]/g, '');
-    s = s.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000\u1680]/g, ' ');
+    s = s.replace(/\p{White_Space}/gu, ' ');
     s = s.replace(/\s+/g, ' ').trim();
     return s;
   }
