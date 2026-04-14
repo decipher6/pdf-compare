@@ -800,7 +800,8 @@
   function joinDocxWordParts(parts) {
     return parts
       .join(' ')
-      .replace(/>\s+</g, '><')
+      // Do not strip whitespace between tags (e.g. </span> <span>); that space is
+      // the word gap for consecutive inline diff highlights.
       .replace(/\s+<br\s*\/?>/gi, '<br>')
       .replace(/<br\s*\/?>\s+/gi, '<br>')
       .replace(/\s{2,}/g, ' ')
@@ -848,16 +849,16 @@
       } else {
         remWords += runRem.length;
         addWords += runAdd.length;
-        leftParts.push(
-          '<span class="docx-diff-removed">' +
-            joinDocxWordParts(runRem.map(function (idx) { return escapeDocxWordToken(oldStrs[idx]); })) +
-          '</span>'
-        );
-        rightParts.push(
-          '<span class="docx-diff-added">' +
-            joinDocxWordParts(runAdd.map(function (idx) { return escapeDocxWordToken(newStrs[idx]); })) +
-          '</span>'
-        );
+        runRem.forEach(function (idx) {
+          leftParts.push(
+            '<span class="docx-diff-removed">' + escapeDocxWordToken(oldStrs[idx]) + '</span>'
+          );
+        });
+        runAdd.forEach(function (idx) {
+          rightParts.push(
+            '<span class="docx-diff-added">' + escapeDocxWordToken(newStrs[idx]) + '</span>'
+          );
+        });
       }
     }
     return {
@@ -920,33 +921,38 @@
         else { runAdd.push(i2++); }
         opIdx++;
       }
-      if (runRem.length === 1 && runAdd.length === 1) {
-        var b1 = blocks1[runRem[0]];
-        var b2 = blocks2[runAdd[0]];
-        var built = buildDocxHtmlGrouped(
-          docxPlainTextToWordsWithBreaks(htmlFragmentToPlainWithBreaks(b1.html)),
-          docxPlainTextToWordsWithBreaks(htmlFragmentToPlainWithBreaks(b2.html))
+      var pairN = Math.min(runRem.length, runAdd.length);
+      var pi;
+      for (pi = 0; pi < pairN; pi++) {
+        var bPair1 = blocks1[runRem[pi]];
+        var bPair2 = blocks2[runAdd[pi]];
+        var builtPair = buildDocxHtmlGrouped(
+          docxPlainTextToWordsWithBreaks(htmlFragmentToPlainWithBreaks(bPair1.html)),
+          docxPlainTextToWordsWithBreaks(htmlFragmentToPlainWithBreaks(bPair2.html))
         );
-        leftParts.push('<div class="docx-diff-para">' + built.left + '</div>');
-        rightParts.push('<div class="docx-diff-para">' + built.right + '</div>');
-        remWords += built.remWords;
-        addWords += built.addWords;
-        continue;
+        leftParts.push('<div class="docx-diff-para">' + builtPair.left + '</div>');
+        rightParts.push('<div class="docx-diff-para">' + builtPair.right + '</div>');
+        remWords += builtPair.remWords;
+        addWords += builtPair.addWords;
       }
-      var maxLen = Math.max(runRem.length, runAdd.length);
-      for (var k = 0; k < maxLen; k++) {
-        if (k < runRem.length) {
-          leftParts.push('<div class="docx-diff-removed-block">' + blocks1[runRem[k]].html + '</div>');
-          remWords += countWords(blocks1[runRem[k]].text);
-        } else {
-          leftParts.push('<div class="docx-diff-para docx-diff-empty"></div>');
-        }
-        if (k < runAdd.length) {
-          rightParts.push('<div class="docx-diff-added-block">' + blocks2[runAdd[k]].html + '</div>');
-          addWords += countWords(blocks2[runAdd[k]].text);
-        } else {
-          rightParts.push('<div class="docx-diff-para docx-diff-empty"></div>');
-        }
+      for (; pi < runRem.length; pi++) {
+        var builtRemOnly = buildDocxHtmlGrouped(
+          docxPlainTextToWordsWithBreaks(htmlFragmentToPlainWithBreaks(blocks1[runRem[pi]].html)),
+          []
+        );
+        leftParts.push('<div class="docx-diff-para">' + builtRemOnly.left + '</div>');
+        rightParts.push('<div class="docx-diff-para docx-diff-empty"></div>');
+        remWords += builtRemOnly.remWords;
+      }
+      var aj;
+      for (aj = pairN; aj < runAdd.length; aj++) {
+        var builtAddOnly = buildDocxHtmlGrouped(
+          [],
+          docxPlainTextToWordsWithBreaks(htmlFragmentToPlainWithBreaks(blocks2[runAdd[aj]].html))
+        );
+        leftParts.push('<div class="docx-diff-para docx-diff-empty"></div>');
+        rightParts.push('<div class="docx-diff-para">' + builtAddOnly.right + '</div>');
+        addWords += builtAddOnly.addWords;
       }
     }
     return {
