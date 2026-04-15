@@ -778,6 +778,15 @@
     return docxPlainTextToWords(text);
   }
 
+  /**
+   * DOCX tokens for semantic diff, including soft line breaks as '\n'.
+   * This keeps DOCX behavior closer to the PDF semantic path (single token stream).
+   */
+  function docxHtmlToWordsWithBreaks(html) {
+    var text = htmlFragmentToPlainWithBreaks(html || '');
+    return docxPlainTextToWordsWithBreaks(text);
+  }
+
   function docxPlainTextToWords(text) {
     var normalized = normText(text);
     if (!normalized) return [];
@@ -811,6 +820,128 @@
   function escapeDocxWordToken(w) {
     if (w === '\n') return '<br>';
     return escapeHtml(w);
+  }
+
+  function collectDocxWordTokens(doc) {
+    var tokens = [];
+    if (!doc || !doc.body) return tokens;
+    var walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, null);
+    var node;
+    while ((node = walker.nextNode())) {
+      var txt = node.nodeValue || '';
+      if (!txt) continue;
+      var m;
+      var re = /\S+/g;
+      while ((m = re.exec(txt)) !== null) {
+        var raw = m[0];
+        var normalized = normalizeWordForDiff(raw);
+        if (!normalized) continue;
+        tokens.push({
+          word: normalized,
+          node: node,
+          start: m.index,
+          end: m.index + raw.length
+        });
+      }
+    }
+    return tokens;
+  }
+
+  function applyDocxWordHighlights(doc, tokens, highlightIdxMap, cssClass) {
+    if (!doc || !doc.body || !tokens.length) return;
+    var byNode = new Map();
+    for (var i = 0; i < tokens.length; i++) {
+      var t = tokens[i];
+      var arr = byNode.get(t.node);
+      if (!arr) {
+        arr = [];
+        byNode.set(t.node, arr);
+      }
+      arr.push({
+        start: t.start,
+        end: t.end,
+        highlight: !!highlightIdxMap[i]
+      });
+    }
+    byNode.forEach(function (segs, node) {
+      if (!segs.length) return;
+      var text = node.nodeValue || '';
+      var frag = doc.createDocumentFragment();
+      var cursor = 0;
+      for (var si = 0; si < segs.length; si++) {
+        var s = segs[si];
+        if (s.start > cursor) {
+          frag.appendChild(doc.createTextNode(text.slice(cursor, s.start)));
+        }
+        var piece = text.slice(s.start, s.end);
+        if (s.highlight) {
+          var span = doc.createElement('span');
+          span.className = cssClass;
+          span.textContent = piece;
+          frag.appendChild(span);
+        } else {
+          frag.appendChild(doc.createTextNode(piece));
+        }
+        cursor = s.end;
+      }
+      if (cursor < text.length) {
+        frag.appendChild(doc.createTextNode(text.slice(cursor)));
+      }
+      node.parentNode.replaceChild(frag, node);
+    });
+  }
+
+  function buildDocxHtmlPreservingMarkup(oldHtml, newHtml) {
+    var parser = new DOMParser();
+    var oldDoc = parser.parseFromString(oldHtml || '', 'text/html');
+    var newDoc = parser.parseFromString(newHtml || '', 'text/html');
+
+    var oldTokens = collectDocxWordTokens(oldDoc);
+    var newTokens = collectDocxWordTokens(newDoc);
+    var oldStrs = oldTokens.map(function (t) { return t.word; });
+    var newStrs = newTokens.map(function (t) { return t.word; });
+
+    var removedMap = {};
+    var addedMap = {};
+    var removedWordCount = 0;
+    var addedWordCount = 0;
+
+    var wordOps = myersDiff(oldStrs, newStrs);
+    var i1 = 0, i2 = 0, opIdx = 0;
+    while (opIdx < wordOps.length) {
+      if (wordOps[opIdx].type === 'equal') {
+        i1++; i2++; opIdx++;
+        continue;
+      }
+      var runRem = [], runAdd = [];
+      while (opIdx < wordOps.length && wordOps[opIdx].type !== 'equal') {
+        if (wordOps[opIdx].type === 'remove') { runRem.push(i1++); }
+        else { runAdd.push(i2++); }
+        opIdx++;
+      }
+      var remText = runRem.map(function (idx) { return oldStrs[idx]; }).join('');
+      var addText = runAdd.map(function (idx) { return newStrs[idx]; }).join('');
+      if (remText !== addText) {
+        for (var ri = 0; ri < runRem.length; ri++) {
+          removedMap[runRem[ri]] = true;
+          removedWordCount++;
+        }
+        for (var ai = 0; ai < runAdd.length; ai++) {
+          addedMap[runAdd[ai]] = true;
+          addedWordCount++;
+        }
+      }
+    }
+
+    applyDocxWordHighlights(oldDoc, oldTokens, removedMap, 'docx-diff-removed');
+    applyDocxWordHighlights(newDoc, newTokens, addedMap, 'docx-diff-added');
+
+    return {
+      left: oldDoc.body.innerHTML || '',
+      right: newDoc.body.innerHTML || '',
+      remWords: removedWordCount,
+      addWords: addedWordCount
+    };
   }
 
   function buildDocxHtmlGrouped(oldStrs, newStrs) {
@@ -986,8 +1117,8 @@
         setProgress(35, 'Comparing text…');
         var html1 = results[0].value;
         var html2 = results[1].value;
-        var wordsOld = docxHtmlToPlainWords(html1);
-        var wordsNew = docxHtmlToPlainWords(html2);
+        var wordsOld = docxHtmlToWordsWithBreaks(html1);
+        var wordsNew = docxHtmlToWordsWithBreaks(html2);
         var oldStrs = wordsOld.map(function (w) { return w; });
         var newStrs = wordsNew.map(function (w) { return w; });
 
@@ -1029,14 +1160,7 @@
           leftHtml = h1;
           rightHtml = h2;
         } else {
-          var blocks1 = extractDocxBlocks(h1);
-          var blocks2 = extractDocxBlocks(h2);
-          var built;
-          if (blocks1.length === 0 && blocks2.length === 0) {
-            built = buildDocxHtmlGrouped(oldStrs, newStrs);
-          } else {
-            built = buildDocxBlockDiff(blocks1, blocks2);
-          }
+          var built = buildDocxHtmlPreservingMarkup(h1, h2);
           leftHtml = built.left;
           rightHtml = built.right;
           remWords = built.remWords;
