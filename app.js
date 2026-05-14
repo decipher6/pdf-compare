@@ -1,19 +1,27 @@
 /**
- * PDF Pixel Comparison Tool
- * Client-side only: compares two PDFs and shows overlay or semantic diff.
- * Files never leave the browser.
+ * PDF (and Word) comparison — runs entirely in the browser.
+ *
+ * Rough flow: pick two files → we load them → you hit Compare → we align pages,
+ * then either draw a red/gray pixel overlay or a semantic word-level diff with highlights.
+ * Nothing gets uploaded; it's all ArrayBuffers and canvases in memory.
+ *
+ * Skim the section headers (// ── …) top to bottom; the heavy lifting is in
+ * computePageAlignment, runSemanticOnePage, comparePixels, and the docx_* helpers.
  */
 
 (function () {
   'use strict';
+  // Wrap everything in an IIFE so we don't leak globals and we can use "use strict" once.
 
-  // PDF.js worker
+  // PDF.js needs its worker script URL set explicitly when loading from a CDN.
   if (typeof pdfjsLib !== 'undefined') {
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
 
+  // How sharp page renders are; higher = nicer but slower and more memory.
   var DPI_SCALE = 1.5;
+  // Pixels this "white" or brighter on both sides count as background, not a diff.
   var WHITE_THRESHOLD = 250;
 
   /** Limit concurrent PDF.js page tasks (render + text) to avoid OOM on large decks. */
@@ -40,8 +48,9 @@
   };
 
   // ── DOM refs ────────────────────────────────────────────
+  // Cache elements once at startup — avoids scattered getElementById calls later.
 
-  // Setup view
+  // Setup view (drop zones, file names, compare button, errors)
   var setupView         = document.getElementById('setupView');
   var zone1             = document.getElementById('zone1');
   var zone2             = document.getElementById('zone2');
@@ -55,14 +64,14 @@
   var errorBanner       = document.getElementById('errorBanner');
   var errorText         = document.getElementById('errorText');
 
-  // Results view
+  // Results view (tabs, "new comparison", sync label)
   var resultsSection    = document.getElementById('resultsSection');
   var toolbarSyncLabel  = document.getElementById('toolbarSyncLabel');
   var resultModeSemantic= document.getElementById('resultModeSemantic');
   var resultModeOverlay = document.getElementById('resultModeOverlay');
   var newCompareBtn     = document.getElementById('newCompareBtn');
 
-  // Overlay
+  // Overlay mode: single canvas, page flip, zoom, download as PDF
   var overlayResults    = document.getElementById('overlayResults');
   var resultCanvas      = document.getElementById('resultCanvas');
   var matchPercentEl    = document.getElementById('matchPercent');
@@ -75,7 +84,7 @@
   var zoomValueEl       = document.getElementById('zoomValue');
   var downloadBtn       = document.getElementById('downloadBtn');
 
-  // Semantic
+  // Semantic mode: side-by-side stacks or Word HTML panels + change counts
   var semanticResults        = document.getElementById('semanticResults');
   var semanticCanvas1        = document.getElementById('semanticCanvas1');
   var semanticCanvas2        = document.getElementById('semanticCanvas2');
@@ -106,6 +115,7 @@
   var semanticStack2 = null;
 
   // ── State ───────────────────────────────────────────────
+  // Holds loaded PDF.js documents, optional docx buffers, and whatever the UI is showing.
 
   var pdfDoc1 = null;
   var pdfDoc2 = null;
@@ -117,12 +127,12 @@
   var totalPages = 0;
   var comparisonMode = 'semantic'; // 'overlay' | 'semantic'
 
-  // Overlay state
+  // Overlay state (one "slot" at a time on the big canvas)
   var currentPageIndex = 0;
   var resultCanvases = [];
   var zoomLevel = 1;
 
-  // Semantic state
+  // Semantic state (per aligned row we store two canvases or Word HTML)
   var semanticResultsByPage = [];
   var semanticCurrentPageIndex = 0;
   var semanticZoom1 = 1;
@@ -131,11 +141,12 @@
   // Page alignment: content-based mapping so missing/extra pages align correctly
   var pageAlignment = [];   // array of { pdf1: 1-based page or null, pdf2: 1-based page or null }
 
-  // Cached results so switching modes doesn't re-compute if same PDFs
+  // Reuse work when flipping overlay ↔ semantic without reloading files
   var cachedOverlay = null;   // { resultCanvases, totalPages, currentPageIndex }
   var cachedSemantic = null;  // { semanticResultsByPage, totalPages, semanticCurrentPageIndex }
 
   // ── Helpers ─────────────────────────────────────────────
+  // Small UI and file-type utilities used all over the place.
 
   function clearError() { errorBanner.hidden = true; errorText.textContent = ''; }
 
@@ -156,6 +167,7 @@
 
   function loadFile(file, which) {
     if (!file) return;
+    // which is 1 or 2 — maps to left/right slot in the UI
     if (isPdfFile(file)) loadPdf(file, which);
     else if (isDocxFile(file)) loadDocx(file, which);
     else showError('Please upload a PDF or Word (.docx) file.');
@@ -229,6 +241,8 @@
   }
 
   function ensureSemanticStacks() {
+    // For PDF semantic view we stack one canvas per aligned page in a div beside the
+    // old single-canvas elements (kept for compatibility / simpler paths).
     if (!semanticStack1 && semanticWrapper1 && semanticCanvas1) {
       semanticStack1 = document.createElement('div');
       semanticStack1.className = 'semantic-stack';
@@ -259,11 +273,13 @@
   // ── Results visibility ──────────────────────────────────
 
   function showResultsView() {
+    // Flip the main layout from upload-only to "you're looking at results"
     resultsSection.hidden = false;
     document.body.classList.add('has-results');
   }
 
   function hideResultsView() {
+    // Tear down results UI and forget that we're comparing Word vs PDF
     resultsSection.hidden = true;
     document.body.classList.remove('has-results');
     overlayResults.hidden = true;
@@ -276,6 +292,7 @@
   // ── File loading ────────────────────────────────────────
 
   function loadPdf(file, which) {
+    // Reads bytes → pdf.js document. Clears any prior docx on this side.
     if (!isPdfFile(file)) { showError('Please select a PDF file (.pdf).'); return; }
     if (which === 1) docxBuffer1 = null; else docxBuffer2 = null;
     clearError();
@@ -300,6 +317,7 @@
   }
 
   function loadDocx(file, which) {
+    // We keep the raw buffer for compare; mammoth here is just a sanity check that it converts.
     if (!isDocxFile(file)) { showError('Please select a Word file (.docx).'); return; }
     if (which === 1) { pdfDoc1 = null; } else { pdfDoc2 = null; }
     clearError();
@@ -344,6 +362,7 @@
   }
 
   function updateCompareButton() {
+    // Can't mix PDF + Word; button lights up when both sides are the same kind.
     var bothPdf = pdfDoc1 && pdfDoc2;
     var bothDocx = docxBuffer1 && docxBuffer2;
     compareBtn.disabled = !(bothPdf || bothDocx);
@@ -353,6 +372,7 @@
   // ── Upload zones ────────────────────────────────────────
 
   function setupUploadZone(zoneEl, inputEl, which) {
+    // Click zone (except explicit browse button uses hidden input), drag-drop, and picker change.
     zoneEl.addEventListener('click', function (e) {
       if (e.target.classList.contains('browse-btn')) inputEl.click();
     });
@@ -375,6 +395,8 @@
   // ── Result mode tabs (switch within results view) ───────
 
   function activateResultMode(mode) {
+    // Tab switch inside results: overlay is pixel diff; semantic is words + highlights.
+    // Docx can't do overlay — there's no rendered page bitmap to diff the same way.
     if (mode === 'overlay' && isDocxComparison) {
       showError('Content overlay is not available for Word (.docx) comparisons. Semantic text comparison is available.');
       return;
@@ -394,6 +416,7 @@
       else { restoreOverlay(); }
     } else {
       semanticResults.hidden = false;
+      // Brief timeout so the loading shimmer paints before we block on PDF work
       if (!cachedSemantic) {
         showSemanticLoading();
         setTimeout(function () { runSemanticComparison(); }, 30);
@@ -436,6 +459,7 @@
   // ── Compare button ──────────────────────────────────────
 
   compareBtn.addEventListener('click', function () {
+    // Word path is separate — no page alignment, just HTML + word diff in the panes.
     if (docxBuffer1 && docxBuffer2) {
       runDocxCompareFlow();
       return;
@@ -445,6 +469,7 @@
     comparisonMode = 'semantic';
     clearError();
 
+    // PDF path: fingerprint every page on both docs, then DP-align, then semantic compare
     var numPages1 = pdfDoc1.numPages;
     var numPages2 = pdfDoc2.numPages;
     if (numPages1 === 0 && numPages2 === 0) {
@@ -486,6 +511,8 @@
   });
 
   // ===== OVERLAY COMPARISON ===============================
+  // Rasterize both PDF pages to canvases, pad to same size, then per-pixel:
+  // white = both white, gray = same non-white pixel, red = different.
 
   function renderPdfPage(pdfDoc, pageNum) {
     return pdfDoc.getPage(pageNum).then(function (page) {
@@ -502,6 +529,7 @@
   }
 
   function normalizeToSameSize(r1, r2) {
+    // If one page is shorter, letterbox with white so comparePixels can walk one grid.
     var w = Math.max(r1.width, r2.width);
     var h = Math.max(r1.height, r2.height);
     function norm(src) {
@@ -515,6 +543,7 @@
   }
 
   function comparePixels(c1, c2, w, h) {
+    // Walk RGBA buffers in lockstep. "match" includes intentional white-on-white.
     var d1 = c1.getContext('2d').getImageData(0, 0, w, h).data;
     var d2 = c2.getContext('2d').getImageData(0, 0, w, h).data;
     var out = document.createElement('canvas'); out.width = w; out.height = h;
@@ -539,6 +568,7 @@
   }
 
   function compareOnePage(pageNum1, pageNum2) {
+    // Render both pages, pad, pixel-compare — used only from overlay path.
     return Promise.all([renderPdfPage(pdfDoc1, pageNum1), renderPdfPage(pdfDoc2, pageNum2)])
       .then(function (arr) {
         var n = normalizeToSameSize(arr[0], arr[1]);
@@ -548,6 +578,7 @@
   }
 
   function compareOneSlot(slotIndex) {
+    // One row in pageAlignment: might be both PDFs, or only one side (insert/delete page).
     var slot = pageAlignment[slotIndex];
     if (!slot) return Promise.resolve(null);
     var p1 = slot.pdf1;
@@ -577,6 +608,7 @@
   }
 
   function runOverlayComparison() {
+    // Lazy: we only guarantee page 0 is computed here; others load when you flip pages.
     resultCanvases = [];
     currentPageIndex = 0;
     zoomLevel = 1;
@@ -620,6 +652,7 @@
   }
 
   function showOverlayPage(idx) {
+    // Cache hit: already have this slot. Miss: render+compare in the background.
     if (idx < 0 || idx >= totalPages) return;
     currentPageIndex = idx;
     if (resultCanvases[idx]) {
@@ -648,6 +681,7 @@
   zoomOutBtn.addEventListener('click', function () { zoomLevel = Math.max(0.25, zoomLevel - 0.25); zoomValueEl.textContent = Math.round(zoomLevel * 100) + '%'; applyOverlayZoom(); });
 
   function applyOverlayZoom() {
+    // We zoom with CSS max-width/height so we don't resize the backing canvas bitmap.
     resultCanvas.style.maxWidth = zoomLevel === 1 ? '100%' : (zoomLevel * 100) + '%';
     if (zoomLevel === 1) {
       resultCanvas.style.maxHeight = '';
@@ -673,6 +707,7 @@
 
   // Overlay download
   downloadBtn.addEventListener('click', function () {
+    // Fill any missing slots, stitch PNGs into a multi-page jsPDF document.
     if (totalPages === 0) return;
     downloadBtn.disabled = true;
     setLoading(true);
@@ -702,6 +737,7 @@
   });
 
   function myersDiff(oldWords, newWords) {
+    // Classic Myers diff at word granularity — returns a list of equal / remove / add ops.
     const n = oldWords.length;
     const m = newWords.length;
     const max = n + m;
@@ -709,6 +745,7 @@
     const v = new Array(2 * max + 1).fill(0);
     const trace = [];
     outer: for (let d = 0; d <= max; d++) {
+      // d = number of edits so far; grow until paths reach (n, m)
       trace.push([...v]);
       for (let k = -d; k <= d; k += 2) {
         const idx = k + max;
@@ -724,6 +761,7 @@
     const ops = [];
     let x = n, y = m;
     for (let d = trace.length - 1; d >= 0 && (x > 0 || y > 0); d--) {
+      // Walk the trace backward to recover add/remove/equal ops
       const vSnap = trace[d];
       const k = x - y;
       const idx = k + max;
@@ -745,6 +783,7 @@
   }
 
   // ===== DOCX SEMANTIC (Word only; PDF workflow unchanged) ===
+  // Mammoth turns .docx → HTML; we diff tokens and wrap changes in spans for the side panes.
 
   function escapeHtml(s) {
     if (s == null) return '';
@@ -892,6 +931,7 @@
   }
 
   function buildDocxHtmlPreservingMarkup(oldHtml, newHtml) {
+    // Walk real text nodes so bold/lists survive; highlights are spans around changed words.
     var parser = new DOMParser();
     var oldDoc = parser.parseFromString(oldHtml || '', 'text/html');
     var newDoc = parser.parseFromString(newHtml || '', 'text/html');
@@ -945,6 +985,7 @@
   }
 
   function buildDocxHtmlGrouped(oldStrs, newStrs) {
+    // Flat token stream → HTML string for one paragraph (used when we don't need DOM fidelity).
     var wordOps = myersDiff(oldStrs, newStrs);
     var leftParts = [];
     var rightParts = [];
@@ -1001,6 +1042,7 @@
   }
 
   function extractDocxBlocks(html) {
+    // Split body into top-level blocks (paragraphs, headings, list items) for coarse alignment.
     var parser = new DOMParser();
     var doc = parser.parseFromString(html || '', 'text/html');
     var blocks = [];
@@ -1026,6 +1068,7 @@
   }
 
   function buildDocxBlockDiff(blocks1, blocks2) {
+    // Myers on block *text* first; when a pair of blocks differ, drill into word-level diff inside them.
     var w1 = blocks1.map(function (b) { return b.text; });
     var w2 = blocks2.map(function (b) { return b.text; });
     var wordOps = myersDiff(w1, w2);
@@ -1095,6 +1138,7 @@
   }
 
   function runDocxCompareFlow() {
+    // Single "virtual" page of HTML — no canvas stacks, no PDF.js.
     isDocxComparison = true;
     clearError();
     cachedOverlay = null;
@@ -1126,6 +1170,7 @@
         var newJoined = newStrs.join('');
         var needsDiff = oldJoined !== newJoined;
 
+        // Multiset trick: same multiset of tokens but different order → treat as no diff (reorder only)
         var oldBag = {};
         var newBag = {};
         var bagKey;
@@ -1199,6 +1244,7 @@
   }
 
   // ===== SEMANTIC COMPARISON ==============================
+  // Uses PDF.js text layer: extract words in reading order, diff, draw semi-transparent rects.
 
   var LINE_Y_TOLERANCE = 5;
 
@@ -1218,6 +1264,7 @@
   }
 
   function joinWithImpliedSpaces(items) {
+    // PDFs often omit space characters between runs; infer a space from x-gap vs char width.
     if (!items.length) return '';
     var result = items[0].str;
     for (var i = 1; i < items.length; i++) {
@@ -1237,6 +1284,7 @@
   }
 
   function getTextLinesFromPage(page) {
+    // Used for "whole line" highlighting when a page exists on only one document.
     return page.getTextContent().then(function (content) {
       var items = content.items || [];
       if (!items.length) return [];
@@ -1285,6 +1333,7 @@
   }
 
   function getDocFingerprints(pdfDoc) {
+    // One short text fingerprint per page — cheap way to line up doc A vs doc B before the heavy diff.
     var n = pdfDoc.numPages;
     var factories = [];
     for (var i = 1; i <= n; i++) {
@@ -1348,6 +1397,8 @@
   }
 
   function computePageAlignment(fp1, fp2) {
+    // Dynamic programming: walk both page lists, score "match" cells by fingerprint similarity,
+    // prefer matches, else consume extra pages from one side as insertions.
     var n1 = fp1.length;
     var n2 = fp2.length;
     var sim = function (i, j) {
@@ -1417,6 +1468,7 @@
   }
 
   function pdfRectToViewport(rect, vp) {
+    // PDF coords are bottom-left origin; canvas is top-left — flip Y when drawing highlights.
     var s = vp.scale, vh = vp.height;
     return { x: rect.x * s, y: vh - (rect.y + rect.h) * s, w: rect.w * s, h: rect.h * s };
   }
@@ -1458,6 +1510,7 @@
   }
 
   function getWordRectsFlat(page) {
+    // Flat word list with rects, Y-then-X sorted — handy if you ever need rects without the line grouping step.
     return page.getTextContent().then(function (content) {
       var words = [];
       var items = (content.items || []).slice();
@@ -1494,6 +1547,7 @@
   }
 
   function renderPageWithHighlights(page, vp, rects, fill) {
+    // White background, render PDF, then paint highlight rectangles on top in viewport space.
     var c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
     var ctx = c.getContext('2d');
     ctx.fillStyle = 'white'; ctx.fillRect(0, 0, c.width, c.height);
@@ -1506,6 +1560,7 @@
 
   /** Assign each word to the first line it overlaps vertically. Returns array of word arrays per line. */
   function assignWordsToLines(lines, words) {
+    // Bucket each word into the first text line whose vertical span overlaps the word's box.
     var wordsPerLine = lines.map(function () { return []; });
     if (!lines.length) return wordsPerLine;
     words.forEach(function (w) {
@@ -1616,6 +1671,7 @@
         ]).then(function (arr) {
           var MARGIN_PCT = 0.02;
           function stripHeaderFooter(words, pageH) {
+            // Ignore top/bottom 2% band so running headers/footers don't dominate the word diff.
             var yMin = pageH * MARGIN_PCT;
             var yMax = pageH * (1 - MARGIN_PCT);
             return words.filter(function (w) {
@@ -1637,6 +1693,7 @@
 
           var needsDiff = oldJoined !== newJoined;
 
+          // Same multiset of words but different order → not a semantic change for our purposes
           var oldBag = {}, newBag = {}, bagKey;
           for (var bi = 0; bi < oldStrs.length; bi++) { bagKey = oldStrs[bi]; oldBag[bagKey] = (oldBag[bagKey] || 0) + 1; }
           for (var bj = 0; bj < newStrs.length; bj++) { bagKey = newStrs[bj]; newBag[bagKey] = (newBag[bagKey] || 0) + 1; }
@@ -1694,6 +1751,7 @@
   }
 
   function createBlankCanvas(w, h) {
+    // Placeholder for "this side has no page" so layout stays balanced.
     var c = document.createElement('canvas');
     c.width = w;
     c.height = h;
@@ -1704,6 +1762,7 @@
   }
 
   function runSemanticOneSlot(slotIndex) {
+    // Dispatch: both pages → word diff; only left → all red; only right → all green; neither → blank pair.
     var slot = pageAlignment[slotIndex];
     if (!slot) {
       var empty = createBlankCanvas(100, 100);
@@ -1781,6 +1840,7 @@
   }
 
   function runSemanticComparison() {
+    // Fan out one promise per aligned slot, cap concurrency with promisePool, then stack canvases.
     isDocxComparison = false;
     showDocxSemanticPanels(false);
     resetPdfSemanticLabels();
@@ -1806,6 +1866,7 @@
 
     var factories = [];
     for (var si = 0; si < totalPages; si++) {
+      // IIFE captures slot index — classic loop closure gotcha
       (function (slotIdx) {
         factories.push(function () {
           return trackProgress(runSemanticOneSlot(slotIdx));
@@ -1828,6 +1889,7 @@
   }
 
   function drawSemanticAllPages(allPages) {
+    // Build two vertical stacks so scrolling shows every aligned page pair at once.
     if (!allPages || !allPages.length) return;
 
     ensureSemanticStacks();
@@ -1905,6 +1967,7 @@
   }
 
   // Semantic scroll sync
+  // When the checkbox is on, scrolling one pane copies scrollTop/Left to the other (guarded by `syncing` flag).
   if (scrollSyncCheckbox && semanticWrapper1 && semanticWrapper2) {
     var syncing = false;
     function sync(src, tgt) {
@@ -1951,6 +2014,7 @@
   });
 
   function cacheSemantic() {
+    // Word mode caches raw HTML strings; PDF mode caches the canvas payload array.
     if (isDocxComparison) {
       cachedSemantic = {
         isDocx: true,
@@ -1967,6 +2031,7 @@
   }
 
   function restoreSemantic() {
+    // Putting cached state back into the DOM when user toggles away from semantic and returns.
     if (!cachedSemantic) return;
     totalPages = cachedSemantic.totalPages;
     semanticCurrentPageIndex = cachedSemantic.semanticCurrentPageIndex;
@@ -1997,6 +2062,8 @@
   }
 
   downloadReportBtn.addEventListener('click', function () {
+    // Docx: rasterize the HTML panels with html2canvas, then one jsPDF spread.
+    // PDF: use the already-rendered highlight canvases (short setTimeout lets layout settle).
     if (!semanticResultsByPage.length) return;
     downloadReportBtn.disabled = true;
     downloadReportBtn.textContent = 'Generating…';
